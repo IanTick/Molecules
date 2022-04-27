@@ -147,6 +147,9 @@ mod acell {
                             */
                         }
                     }
+                    else {
+                        (*latest).chained_flag.store(true, Ordering::Release);
+                    }
                 }
 
                 Err(_) => (),
