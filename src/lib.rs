@@ -65,7 +65,6 @@ mod acell {
         pub fn swap(&self, value: T) -> Arc<T> {
             let to_acnode = ACNode::new(value);
 
-            self.load_counter.fetch_add(1, Ordering::AcqRel);
             let old = self.ptr.swap(to_acnode, Ordering::AcqRel);
 
             let ret_val;
@@ -77,7 +76,7 @@ mod acell {
                 (*to_acnode).chained_flag.store(true, Ordering::Release);
             }
 
-            if self.load_counter.fetch_sub(1, Ordering::AcqRel) == 1 {
+            if self.load_counter.load(Ordering::Acquire) == 0 {
                 unsafe {
                     self.free(to_acnode);
                 };
@@ -526,10 +525,10 @@ mod tests {
         }
     }
 
-    /*#[test]
+    #[test]
     fn it_works() {
         single_test();
-    }*/
+    }
 
     #[test]
     fn acell_store() {
