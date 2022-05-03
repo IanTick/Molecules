@@ -1,5 +1,4 @@
 use std::{sync::Arc, thread};
-
 use molecules::collections::MlcMap::*;
 use molecules::primitives::AtomicCell::*;
 
@@ -29,7 +28,7 @@ where
 
 #[test]
 fn it_works() {
-    single_test();
+    single_test(); // Ignore this.
 }
 
 #[test]
@@ -53,6 +52,7 @@ fn acell_store() {
 
 #[test]
 fn acell_load_store() {
+    // Actual test. Kinda slow (with miri). ~20 000 loads/stores.
     let fancy_cell = Arc::new(AtomicCell::new("Bonjour"));
     let arcyboi = fancy_cell.clone();
     let mut vector = Vec::new();
