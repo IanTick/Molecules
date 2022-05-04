@@ -211,6 +211,32 @@ impl<T> AtomicCell<T> {
             Err(_) => (),
         }
     }
+
+    pub (crate) fn double_load(&self) -> (Arc<T>, *mut ACNode<T>) {
+        /* Marks that we perform a load operation. Since a thread may be stuck between getting the ptr and derefing it no frees must happen while a load is in progress.
+        Otherwise the ACNode may be removed from under our feet. */
+        self.load_counter.fetch_add(1, Ordering::AcqRel);
+        let latest = self.ptr.load(Ordering::Acquire);
+        /* .value of the ACNode stores an Arc */
+        let ret_val = unsafe { (*latest).value.clone() };
+
+        /* Again, free memory if possible. And mark the load operation as completed. */
+        if self.load_counter.fetch_sub(1, Ordering::AcqRel) == 1 {
+            unsafe {
+                self.free(latest);
+            }
+        }
+        (ret_val, latest)
+    }
+
+    pub (crate) unsafe fn cas(&self, expected: *mut ACNode<T>, new: T) -> Result<(), Result<T, Arc<T>>>{
+        let new_node = ACNode::new(new);
+
+        match self.ptr.compare_exchange(expected, new_node, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {Ok(())},
+            Err(_) => {Err((ACNode::into_inner(new_node)))},
+        }
+    }
 }
 
 impl<T: Eq> AtomicCell<T> {
@@ -262,7 +288,7 @@ impl<T> Drop for AtomicCell<T> {
 unsafe impl<T: Send> Send for AtomicCell<T> {}
 unsafe impl<T: Send + Sync> Sync for AtomicCell<T> {}
 
-struct ACNode<T> {
+pub (crate) struct ACNode<T> {
     next: *mut Self,
     value: Arc<T>,
     chained_flag: AtomicBool,
