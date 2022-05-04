@@ -3,41 +3,34 @@ use std::marker::PhantomData;
 use std::sync::atomic::{compiler_fence, AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-
-
-
-
 /* AtomicCell<T> simulates basic atomic operations on any type T. It mimics the behaviour of actual atomics:
 
                 |              |                |
 AtomicU64       | .store(u64)  | .load()        | .swap(u64)
                 |  u64 -> ()   |    -> u64      |   u64 -> u64          *Memory Ordering omitted.
 --------------------------------------------------------------------
-                |              |                |       
-AtomicCell<u64> | .store(u64)  | .load()        | .swap(u64)            
+                |              |                |
+AtomicCell<u64> | .store(u64)  | .load()        | .swap(u64)
                 |  u64 -> ()   |    -> Arc<u64> |   u64 -> Arc<u64>     *Memory Ordering is always Acq/Rel.
 
 
 Note that T may or may not be 'Copy'. To avoid extra allocation only an Arc<T> is returned. If T is 'Clone' an owned
 return value is trivial. */
 
-
 pub struct AtomicCell<T> {
-    /* How many loads are currently in progress. After a load operation is finished it can decrement this value again. 
+    /* How many loads are currently in progress. After a load operation is finished it can decrement this value again.
     Swaps do not load. */
     load_counter: AtomicUsize,
     /* An 'AtomicPtr' to the latest stored value of T. The 'ACNode<T>' contains the value and other important information for freeing memory.*/
     ptr: AtomicPtr<ACNode<T>>,
-    /* When 'AtomicCell<T>' is dropped then so is 'ACNode<T>' and hence some T. This has to be known by the compiler as 
+    /* When 'AtomicCell<T>' is dropped then so is 'ACNode<T>' and hence some T. This has to be known by the compiler as
     'AtomicCell<T>' does - itself - not "hold" an instance of T */
     _marker: PhantomData<ACNode<T>>,
 }
 
-
 /* No assumptions about T is made. (As of right now it still need to be 'Sized') */
 impl<T> AtomicCell<T> {
-
-    /* Simply constructs a new 'AtomicCell<T>', it obviously takes ownership of values. From creation to destruction there must ALWAYS 
+    /* Simply constructs a new 'AtomicCell<T>', it obviously takes ownership of values. From creation to destruction there must ALWAYS
     be a valid T stored inside the AtomicCell. */
     pub fn new(value: T) -> Self {
         let cell = Self {
@@ -47,7 +40,7 @@ impl<T> AtomicCell<T> {
             _marker: PhantomData,
         };
 
-        /* The ACNode contains a "chained flag" which marks whether a given ACNode is "chained" to its preceeding ACNodes. 
+        /* The ACNode contains a "chained flag" which marks whether a given ACNode is "chained" to its preceeding ACNodes.
         As this is the first ACNode created it should be chained.*/
         unsafe {
             (*(cell.ptr.load(Ordering::Acquire)))
@@ -61,7 +54,7 @@ impl<T> AtomicCell<T> {
     pub fn store(&self, value: T) {
         let to_acnode = ACNode::new(value);
 
-        /* The AtomicPtr makes this operation atomic. Any future accesses now follow the new pointer to the new ACNode. 
+        /* The AtomicPtr makes this operation atomic. Any future accesses now follow the new pointer to the new ACNode.
         However some bookkeeping has to be done with the old ACNode. */
         let old = self.ptr.swap(to_acnode, Ordering::AcqRel);
 
@@ -98,7 +91,7 @@ impl<T> AtomicCell<T> {
         ret_val
     }
 
-    /* Swap resembles a store operation. In addition if also follows the "old-pointer" to its predecessor to get its value. 
+    /* Swap resembles a store operation. In addition if also follows the "old-pointer" to its predecessor to get its value.
     Swaps always return the value they replaced. Swaps do not load.*/
     pub fn swap(&self, value: T) -> Arc<T> {
         let to_acnode = ACNode::new(value);
@@ -124,12 +117,12 @@ impl<T> AtomicCell<T> {
     }
 
     /* This function performs heavy logic to free memory. It is best understood after reading the implementation of ACNode.
-    It is marked as unsafe since it uses a raw pointer argument and requires that no threads hold pointers to the given ACNodes predecessors! 
+    It is marked as unsafe since it uses a raw pointer argument and requires that no threads hold pointers to the given ACNodes predecessors!
     -> Guaranteed by load_counter.
     Not public! */
     unsafe fn free(&self, latest: *mut ACNode<T>) {
         /* Remember the "chained flag" of ACNode? It signals whether an ACNode is fully initialized. To perform any operation we "unchain" the ACNode
-         thereby guranteering that is was chained and that no other thread can operate on it. */
+        thereby guranteering that is was chained and that no other thread can operate on it. */
 
         match (*latest).chained_flag.compare_exchange(
             true,
@@ -137,7 +130,7 @@ impl<T> AtomicCell<T> {
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            /* If the cas on the first ACNode succeeds we can proceed... 
+            /* If the cas on the first ACNode succeeds we can proceed...
             Remember: "latest" is the pointer to the very first ("latest") ACNode. */
             Ok(_) => {
                 /* Think of the following code as walking down the nodes of a linked list. There are 3 pointers involved:
@@ -146,20 +139,19 @@ impl<T> AtomicCell<T> {
                 - next_next_ptr -> the pointer from the ACNode are at to another ACNode. This pointer will later replace prev_next_pointer and so on... */
                 let mut next_next_ptr = (*latest).next;
 
-
                 /* Checks if the latest ACNode is self-referential. Self-reference marks some "end" in the list.*/
                 if !(next_next_ptr == latest)
                 // First node is not self-ref.
                 {
                     /* Now we go one ACNode deep
-                    
+
                                          |
                                          | (latest)
                                          |
                         ---------    ----------
                         -       <-----        -
                         --------- |  ----------
-                              prev_next_ptr ( old next_next_ptr)                   
+                              prev_next_ptr ( old next_next_ptr)
                     */
                     let mut prev_next_ptr = next_next_ptr.clone();
 
@@ -221,12 +213,46 @@ impl<T> AtomicCell<T> {
     }
 }
 
+impl<T: Eq> AtomicCell<T> {
+    // Subject to ABA
+    fn cas_by_eq(&self, expected: &T, new: T) -> Result<(), Result<T, Arc<T>>> {
+        let new_node = ACNode::new(new);
+
+        self.load_counter.fetch_add(1, Ordering::AcqRel);
+        let latest = self.ptr.load(Ordering::Acquire);
+
+        unsafe {
+            if *(*latest).value == *expected {
+                match self.ptr.compare_exchange(
+                    latest,
+                    new_node,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        self.load_counter.fetch_sub(1, Ordering::AcqRel);
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        self.load_counter.fetch_sub(1, Ordering::AcqRel);
+                        return Err(ACNode::into_inner(new_node));
+                    }
+                }
+            } else {
+                self.load_counter.fetch_sub(1, Ordering::AcqRel);
+                return Err(ACNode::into_inner(new_node));
+            }
+        }
+    }
+}
+
 impl<T> Drop for AtomicCell<T> {
     fn drop(&mut self) {
         // No reference to AtomicCell exists, since its dropping.
         self.load(); // Drops all but the current ACNode (Load counter = 0)
         let latest = self.ptr.load(Ordering::Acquire);
-        unsafe { // Manually drop the latest node.
+        unsafe {
+            // Manually drop the latest node.
             let boxed_last_node = Box::from_raw(latest);
             drop(boxed_last_node);
         }
@@ -260,5 +286,14 @@ impl<T> ACNode<T> {
             (*correct_ptr).next = correct_ptr; // next is now ptr to self on heap. Self is "leaked".
         }
         correct_ptr
+    }
+
+    fn into_inner(ptr: *mut Self) -> Result<T, Arc<T>> {
+        unsafe {
+            let mut boxed = Box::from_raw(ptr);
+            let arcyboi = boxed.as_ref().value.clone();
+            drop(boxed);
+            return Arc::try_unwrap(arcyboi);
+        }
     }
 }
