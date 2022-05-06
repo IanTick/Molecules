@@ -212,7 +212,7 @@ impl<T> AtomicCell<T> {
         }
     }
 
-    pub (crate) fn double_load(&self) -> (Arc<T>, *mut ACNode<T>) {
+    pub(crate) fn double_load(&self) -> (Arc<T>, *mut ACNode<T>) {
         /* Marks that we perform a load operation. Since a thread may be stuck between getting the ptr and derefing it no frees must happen while a load is in progress.
         Otherwise the ACNode may be removed from under our feet. */
         self.load_counter.fetch_add(1, Ordering::AcqRel);
@@ -229,19 +229,47 @@ impl<T> AtomicCell<T> {
         (ret_val, latest)
     }
 
-    pub (crate) unsafe fn cas(&self, expected: *mut ACNode<T>, new: T) -> Result<(), Result<T, Arc<T>>>{
+    pub(crate) unsafe fn cas(
+        &self,
+        expected: *mut ACNode<T>,
+        new: T,
+    ) -> Result<(), Result<T, Arc<T>>> {
         let new_node = ACNode::new(new);
 
-        match self.ptr.compare_exchange(expected, new_node, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => {Ok(())},
-            Err(_) => {Err((ACNode::into_inner(new_node)))},
+        match self
+            .ptr
+            .compare_exchange(expected, new_node, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => Ok(()),
+            Err(_) => Err((ACNode::into_inner(new_node))),
+        }
+    }
+
+    pub fn fetch_update<O, F>(&self, new: T, func: F) -> Option<O>
+    where
+        F: Fn(Arc<T>) -> (T, Option<O>),
+    {
+        self.load_counter.fetch_add(1, Ordering::AcqRel);
+        loop {
+            let (arg, ptr) = self.double_load();
+
+            let (updated, ouput) = func(arg);
+
+            unsafe {
+                match self.cas(ptr, updated) {
+                    Ok(_) => {
+                        self.load_counter.fetch_sub(1, Ordering::AcqRel);
+                        return ouput;
+                    }
+                    Err(_) => continue,
+                }
+            }
         }
     }
 }
 
 impl<T: Eq> AtomicCell<T> {
-    // Subject to ABA
-    fn cas_by_eq(&self, expected: &T, new: T) -> Result<(), Result<T, Arc<T>>> {
+    pub fn cas_by_eq(&self, expected: &T, new: T) -> Result<(), Result<T, Arc<T>>> {
         let new_node = ACNode::new(new);
 
         self.load_counter.fetch_add(1, Ordering::AcqRel);
@@ -288,7 +316,7 @@ impl<T> Drop for AtomicCell<T> {
 unsafe impl<T: Send> Send for AtomicCell<T> {}
 unsafe impl<T: Send + Sync> Sync for AtomicCell<T> {}
 
-pub (crate) struct ACNode<T> {
+pub(crate) struct ACNode<T> {
     next: *mut Self,
     value: Arc<T>,
     chained_flag: AtomicBool,
