@@ -229,7 +229,7 @@ impl<T> AtomicCell<T> {
         (ret_val, latest)
     }
 
-    pub(crate) unsafe fn cas(
+    pub (crate) unsafe fn cas(
         &self,
         expected: *mut ACNode<T>,
         new: T,
@@ -245,7 +245,7 @@ impl<T> AtomicCell<T> {
         }
     }
 
-    pub fn fetch_update<O, F>(&self, new: T, func: F) -> Option<O>
+    pub fn fetch_update<O, F>(&self, func: F) -> Option<O>
     where
         F: Fn(Arc<T>) -> (T, Option<O>),
     {
@@ -316,14 +316,13 @@ impl<T> Drop for AtomicCell<T> {
 unsafe impl<T: Send> Send for AtomicCell<T> {}
 unsafe impl<T: Send + Sync> Sync for AtomicCell<T> {}
 
-pub(crate) struct ACNode<T> {
+pub (crate) struct ACNode<T> {
     next: *mut Self,
     value: Arc<T>,
     chained_flag: AtomicBool,
 }
 
 impl<T> ACNode<T> {
-    // Init can be assumed of next.
     fn new(value: T) -> *mut Self {
         let false_ptr: *mut Self = std::ptr::null_mut(); // Avoids MaybeUninit
 
