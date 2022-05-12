@@ -212,23 +212,14 @@ impl<T> AtomicCell<T> {
         }
     }
 
-    pub(crate) fn double_load(&self) -> (Arc<T>, *mut ACNode<T>) {
-        /* Marks that we perform a load operation. Since a thread may be stuck between getting the ptr and derefing it no frees must happen while a load is in progress.
-        Otherwise the ACNode may be removed from under our feet. */
-        self.load_counter.fetch_add(1, Ordering::AcqRel);
+    pub(crate) unsafe fn phantom_double_load(&self) -> (Arc<T>, *mut ACNode<T>) {
         let latest = self.ptr.load(Ordering::Acquire);
         /* .value of the ACNode stores an Arc */
         let ret_val = unsafe { (*latest).value.clone() };
-
-        /* Again, free memory if possible. And mark the load operation as completed. */
-        if self.load_counter.fetch_sub(1, Ordering::AcqRel) == 1 {
-            unsafe {
-                self.free(latest);
-            }
-        }
         (ret_val, latest)
     }
 
+    /// UNTESTED!
     pub (crate) unsafe fn cas(
         &self,
         expected: *mut ACNode<T>,
@@ -245,23 +236,27 @@ impl<T> AtomicCell<T> {
         }
     }
 
+    /// UNTESTED!
     pub fn fetch_update<O, F>(&self, func: F) -> Option<O>
     where
         F: Fn(Arc<T>) -> (T, Option<O>),
     {
-        self.load_counter.fetch_add(1, Ordering::AcqRel);
         loop {
-            let (arg, ptr) = self.double_load();
+            self.load_counter.fetch_add(1, Ordering::AcqRel);
+            let (arg, ptr) = unsafe { self.phantom_double_load() };
 
-            let (updated, ouput) = func(arg);
+            let (updated, output) = func(arg);
 
             unsafe {
                 match self.cas(ptr, updated) {
                     Ok(_) => {
                         self.load_counter.fetch_sub(1, Ordering::AcqRel);
-                        return ouput;
+                        return output;
                     }
-                    Err(_) => continue,
+                    Err(_) => {
+                        self.load_counter.fetch_sub(1, Ordering::AcqRel);
+                        continue;
+                    }
                 }
             }
         }
@@ -316,7 +311,7 @@ impl<T> Drop for AtomicCell<T> {
 unsafe impl<T: Send> Send for AtomicCell<T> {}
 unsafe impl<T: Send + Sync> Sync for AtomicCell<T> {}
 
-pub (crate) struct ACNode<T> {
+pub(crate) struct ACNode<T> {
     next: *mut Self,
     value: Arc<T>,
     chained_flag: AtomicBool,

@@ -1,13 +1,9 @@
 #[deny(clippy::pedantic)]
 use crate::primitives::AtomicCell::*;
 use std::sync::Arc;
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-};
 
 pub struct MlcVec<T> {
-    pub (crate) beam: AtomicCell<Vec<Arc<AtomicCell<T>>>>,
+    pub(crate) beam: AtomicCell<Vec<Arc<AtomicCell<T>>>>,
 }
 
 impl<T> MlcVec<T> {
@@ -34,7 +30,7 @@ impl<T> MlcVec<T> {
         Some((*self.beam.load()).get(idx)?.clone())
     }
 
-    pub fn push(&self, value: T) {
+    /*pub fn push(&self, value: T) {
         let mut elem = Arc::new(AtomicCell::new(value));
 
         loop {
@@ -52,7 +48,7 @@ impl<T> MlcVec<T> {
                 }
             }
         }
-    }
+    }*/
 
     /*pub fn remove(&self, ) {
         loop {
@@ -63,6 +59,6 @@ impl<T> MlcVec<T> {
             let mut owned_vec = (*vec).clone();
             owned_vec.remove(idx);
         }
-    }*/ 
-    pub fn pop(){}
+    }*/
+    pub fn pop() {}
 }

@@ -1,10 +1,10 @@
+use crate::primitives::AtomicCell::*;
 #[deny(clippy::pedantic)]
 use std::sync::Arc;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
 };
-use  crate::primitives::AtomicCell::*;
 // ctries or concurrent hamt
 pub struct MlcMap<K, V> {
     is_creator: bool,
