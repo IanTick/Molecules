@@ -1,6 +1,6 @@
 #[deny(clippy::pedantic)]
 use std::marker::PhantomData;
-use std::sync::atomic::{compiler_fence, AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{compiler_fence, AtomicBool, AtomicPtr, AtomicUsize, Ordering, fence};
 use std::sync::Arc;
 
 /* AtomicCell<T> simulates basic atomic operations on any type T. It mimics the behaviour of actual atomics:
@@ -220,19 +220,19 @@ impl<T> AtomicCell<T> {
     }
 
     /// UNTESTED!
-    pub (crate) unsafe fn cas(
+    pub(crate) unsafe fn cas(
         &self,
         expected: *mut ACNode<T>,
-        new: T,
-    ) -> Result<(), Result<T, Arc<T>>> {
-        let new_node = ACNode::new(new);
+        new: *mut ACNode<T>,
+    ) -> Result<(), ()> {
+        // let new_node = ACNode::new(new);
 
         match self
             .ptr
-            .compare_exchange(expected, new_node, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(expected, new, Ordering::AcqRel, Ordering::Acquire)
         {
             Ok(_) => Ok(()),
-            Err(_) => Err((ACNode::into_inner(new_node))),
+            Err(_) => Err(()),
         }
     }
 
@@ -246,15 +246,20 @@ impl<T> AtomicCell<T> {
             let (arg, ptr) = unsafe { self.phantom_double_load() };
 
             let (updated, output) = func(arg);
+            let to_new = ACNode::new(updated);
 
             unsafe {
-                match self.cas(ptr, updated) {
+                match self.cas(ptr, to_new) {
                     Ok(_) => {
+                        (*to_new).next = ptr;
+                        fence(Ordering::AcqRel);
+                        (*to_new).chained_flag.store(true, Ordering::Release);
                         self.load_counter.fetch_sub(1, Ordering::AcqRel);
                         return output;
                     }
                     Err(_) => {
                         self.load_counter.fetch_sub(1, Ordering::AcqRel);
+                        drop(Box::from_raw(to_new));
                         continue;
                     }
                 }
@@ -264,34 +269,29 @@ impl<T> AtomicCell<T> {
 }
 
 impl<T: Eq> AtomicCell<T> {
-    pub fn cas_by_eq(&self, expected: &T, new: T) -> Result<(), Result<T, Arc<T>>> {
-        let new_node = ACNode::new(new);
+    pub fn cas_by_eq(&self, expected: &T, new: T) -> Result<(), ()> {
+        let to_new = ACNode::new(new);
 
         self.load_counter.fetch_add(1, Ordering::AcqRel);
         let latest = self.ptr.load(Ordering::Acquire);
 
         unsafe {
             if *(*latest).value == *expected {
-                match self.ptr.compare_exchange(
-                    latest,
-                    new_node,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
+                match self.cas(latest, to_new) {
                     Ok(_) => {
+                        (*to_new).next = latest;
+                        fence(Ordering::AcqRel);
+                        (*to_new).chained_flag.store(true, Ordering::Release);
                         self.load_counter.fetch_sub(1, Ordering::AcqRel);
                         return Ok(());
                     }
-                    Err(_) => {
-                        self.load_counter.fetch_sub(1, Ordering::AcqRel);
-                        return Err(ACNode::into_inner(new_node));
-                    }
+                    Err(_) => (),
                 }
-            } else {
-                self.load_counter.fetch_sub(1, Ordering::AcqRel);
-                return Err(ACNode::into_inner(new_node));
-            }
+            };
+            self.load_counter.fetch_sub(1, Ordering::AcqRel);
+            drop(Box::from_raw(to_new));
         }
+        Err(())
     }
 }
 

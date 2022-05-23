@@ -1,6 +1,6 @@
-use std::{sync::Arc, thread};
 use molecules::collections::MlcMap::*;
 use molecules::primitives::AtomicCell::*;
+use std::{sync::Arc, thread};
 
 fn store_bash<T>(cell: Arc<AtomicCell<T>>, new: T)
 where
@@ -114,4 +114,23 @@ fn acell_all() {
 
     //assert!({ *val == "Adieu" || *val == "Adieu Amigo!" || *val == "Au Revoir!" });
     println!("booyah");
+}
+
+#[test]
+fn summing() {
+    let bar = Arc::new(std::sync::Barrier::new(1000));
+    let fancy_cell = Arc::new(AtomicCell::new(0u64));
+
+    let vector = (1..=1000u64)
+        .map(|num| {
+            let x = fancy_cell.clone();
+            let xbar = bar.clone();
+            thread::spawn(move || {xbar.wait(); x.fetch_update::<u64, _>(|cell| ((*cell) + 1, None))})
+        })
+        .collect::<Vec<_>>();
+    for x in vector{
+        x.join();
+    }
+
+    assert_eq!((*fancy_cell.load()), 1000)
 }
