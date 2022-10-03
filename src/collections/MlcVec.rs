@@ -20,7 +20,9 @@ impl<T> MlcVec<T> {
         }
     }
 
-    pub fn push(&self, new: Arc<T>) {
+    pub fn push(&self, data: T) {
+
+        let new = Arc::new(data);
         self.beam.fetch_update::<T, _>(|vec| {
             let mut next_vec = (*vec).clone();
             next_vec.push(new.clone());
@@ -35,35 +37,4 @@ impl<T> MlcVec<T> {
             (next_vec, Some(output))
         }).unwrap()
     }
-
-    /*pub fn push(&self, value: T) {
-        let mut elem = Arc::new(AtomicCell::new(value));
-
-        loop {
-            // Get Current vec cloned. (Double load)
-            // Change current vec,
-            // Cas
-            let (vec, ptr) = self.beam.double_load();
-            let mut owned_vec = (*vec).clone();
-            owned_vec.push(elem.clone());
-
-            unsafe {
-                match self.beam.cas(ptr, owned_vec) {
-                    Ok(_) => break,
-                    Err(_) => continue,
-                }
-            }
-        }
-    }*/
-
-    /*pub fn remove(&self, ) {
-        loop {
-            // Get Current vec cloned. (Double load)
-            // Change current vec,
-            // Cas
-            let (vec, ptr) = self.beam.double_load();
-            let mut owned_vec = (*vec).clone();
-            owned_vec.remove(idx);
-        }
-    }*/
 }

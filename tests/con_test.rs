@@ -1,6 +1,22 @@
 use molecules::collections::MlcMap::*;
 use molecules::primitives::AtomicCell::*;
 use std::{sync::Arc, thread};
+#[macro_use] extern crate criterion;
+use criterion::criterion::*;
+
+fn bench(c: &mut Criterion) {
+    // Setup (construct data, allocate memory, etc)
+    let input = 5u64;
+    c.bench_with_input(
+        BenchmarkId::new("function_name", input), &input,
+        |b, i| b.iter(|| {
+            // Code to benchmark using input `i` goes here
+        }),
+    );
+}
+
+criterion_group!(benches, bench);
+criterion_main!(benches);
 
 fn store_bash<T>(cell: Arc<AtomicCell<T>>, new: T)
 where
