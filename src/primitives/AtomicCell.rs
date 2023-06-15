@@ -137,6 +137,7 @@ impl<T> AtomicCell<T> {
                 - latest -> the very first pointer (head).
                 - prev_next_ptr -> the pointer with which we arrived at the ACNode we are currently at.
                 - next_next_ptr -> the pointer from the ACNode are at to another ACNode. This pointer will later replace prev_next_pointer and so on... */
+                //TODO ReadVolatile
                 let mut next_next_ptr = (*latest).next;
 
                 /* Checks if the latest ACNode is self-referential. Self-reference marks some "end" in the list.*/
@@ -167,6 +168,7 @@ impl<T> AtomicCell<T> {
                             // Read the next ptr of the node
                             // Note: We never deref next_next_ptr! Only as prev_next_ptr in the following iteration!
                             Ok(_) => {
+                                //TODO ReadVolatile
                                 next_next_ptr = (*prev_next_ptr).next;
 
                                 if next_next_ptr == prev_next_ptr {
@@ -174,8 +176,9 @@ impl<T> AtomicCell<T> {
                                     let drop_this = Box::from_raw(prev_next_ptr);
                                     drop(drop_this); // gonna be explicit here :)
                                                      // Make the first node self-ref, to mark as end.
+                                    //TODO WriteVolatile
                                     (*latest).next = latest;
-                                    compiler_fence(Ordering::Release);
+                                    compiler_fence(Ordering::AcqRel);
                                     (*latest).chained_flag.store(true, Ordering::Release);
                                     break;
                                 } else {
@@ -188,7 +191,7 @@ impl<T> AtomicCell<T> {
                             Err(_) => {
                                 // This node is not chained, we cant drop it and we cant proceed. Therefore we "bridge" to it for future frees. Then we are done.
                                 (*latest).next = prev_next_ptr;
-                                compiler_fence(Ordering::Release);
+                                compiler_fence(Ordering::AcqRel);
                                 (*latest).chained_flag.store(true, Ordering::Release);
                                 break;
                             }
