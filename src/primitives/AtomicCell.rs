@@ -1,7 +1,8 @@
 #[deny(clippy::pedantic)]
 use std::marker::PhantomData;
-use std::sync::atomic::{compiler_fence, AtomicBool, AtomicPtr, AtomicUsize, Ordering, fence};
+use std::sync::atomic::{fence, AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::ptr::{write_volatile, read_volatile};
 
 /* AtomicCell<T> simulates basic atomic operations on any type T. It mimics the behaviour of actual atomics:
 
@@ -61,7 +62,7 @@ impl<T> AtomicCell<T> {
         /* This links the ACNode we just made to the old ACNode. Afterwards the new ACNode is considered "chained" because it points to it predecessor. */
         unsafe {
             (*to_acnode).next = old;
-            compiler_fence(Ordering::Release);
+            fence(Ordering::Release);
             (*to_acnode).chained_flag.store(true, Ordering::Release);
         }
 
@@ -103,7 +104,7 @@ impl<T> AtomicCell<T> {
             ret_val = (*old).value.clone(); // Simply gets the old ACNode's value.
 
             (*to_acnode).next = old;
-            compiler_fence(Ordering::Release);
+            fence(Ordering::Release);
             (*to_acnode).chained_flag.store(true, Ordering::Release);
         }
 
@@ -138,7 +139,8 @@ impl<T> AtomicCell<T> {
                 - prev_next_ptr -> the pointer with which we arrived at the ACNode we are currently at.
                 - next_next_ptr -> the pointer from the ACNode are at to another ACNode. This pointer will later replace prev_next_pointer and so on... */
                 //TODO ReadVolatile
-                let mut next_next_ptr = (*latest).next;
+                let src = &(*latest).next as *const *mut ACNode<T>;
+                let mut next_next_ptr:*mut ACNode<T> = read_volatile(src);
 
                 /* Checks if the latest ACNode is self-referential. Self-reference marks some "end" in the list.*/
                 if !(next_next_ptr == latest)
@@ -169,7 +171,8 @@ impl<T> AtomicCell<T> {
                             // Note: We never deref next_next_ptr! Only as prev_next_ptr in the following iteration!
                             Ok(_) => {
                                 //TODO ReadVolatile
-                                next_next_ptr = (*prev_next_ptr).next;
+                                let src = &(*prev_next_ptr).next as *const *mut ACNode<T>;
+                                next_next_ptr = read_volatile(src);
 
                                 if next_next_ptr == prev_next_ptr {
                                     // This node is self-referential. Drop it! As it was the last node, we are done.
@@ -177,8 +180,11 @@ impl<T> AtomicCell<T> {
                                     drop(drop_this); // gonna be explicit here :)
                                                      // Make the first node self-ref, to mark as end.
                                     //TODO WriteVolatile
-                                    (*latest).next = latest;
-                                    compiler_fence(Ordering::AcqRel);
+                                    let dst = &mut(*latest).next as *mut *mut ACNode<T>;
+                                    let write_this = latest;
+                                    write_volatile(dst, write_this);
+
+                                    fence(Ordering::AcqRel);
                                     (*latest).chained_flag.store(true, Ordering::Release);
                                     break;
                                 } else {
@@ -191,7 +197,7 @@ impl<T> AtomicCell<T> {
                             Err(_) => {
                                 // This node is not chained, we cant drop it and we cant proceed. Therefore we "bridge" to it for future frees. Then we are done.
                                 (*latest).next = prev_next_ptr;
-                                compiler_fence(Ordering::AcqRel);
+                                fence(Ordering::AcqRel);
                                 (*latest).chained_flag.store(true, Ordering::Release);
                                 break;
                             }
