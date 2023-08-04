@@ -1,6 +1,11 @@
-use molecules::collections::MlcMap::*;
-use molecules::primitives::AtomicCell::*;
+use libmol::collections::MlcMap::*;
+use libmol::primitives::AtomicCell::*;
 use std::{sync::Arc, thread};
+
+fn main(){
+    summing();
+    println!("Hello from con_test main!");
+}
 
 
 fn store_bash<T>(cell: Arc<AtomicCell<T>>, new: T)
@@ -42,9 +47,9 @@ fn acell_store() {
     let w2 = thread::spawn(move || store_bash(arcyboi2, "Adieu Amigo!"));
     let w3 = thread::spawn(move || store_bash(arcyboi3, "Au Revoir!"));
 
-    w1.join();
-    w2.join();
-    w3.join();
+    _=w1.join();
+    _=w2.join();
+    _=w3.join();
 
     let val = fancy_cell.load();
 
@@ -55,18 +60,18 @@ fn acell_store() {
 fn acell_load_store() {
     // Actual test. Kinda slow (with miri). ~20 000 loads/stores.
     let fancy_cell = Arc::new(AtomicCell::new("Bonjour"));
-    let arcyboi = fancy_cell.clone();
+    //let arcyboi = fancy_cell.clone();
     let mut vector = Vec::new();
 
     for _ in 0..1000 {
-        let copy = arcyboi.clone();
+        //let copy = arcyboi.clone();
         let other_copy = fancy_cell.clone();
 
         let handle = thread::spawn(move || store_bash(other_copy, "Something"));
 
         vector.push(handle);
 
-        let copy = arcyboi.clone();
+        //let copy: Arc<AtomicCell<&str>> = arcyboi.clone();
         let other_copy = fancy_cell.clone();
 
         let scnd_handle = thread::spawn(move || load_bash(other_copy));
@@ -75,7 +80,7 @@ fn acell_load_store() {
     }
 
     for i in vector {
-        i.join();
+        _=i.join();
     }
 }
 
@@ -111,26 +116,26 @@ fn acell_all() {
     assert!(w8.join().is_ok());
     assert!(w9.join().is_ok());
 
-    let val = fancy_cell.load();
+    println!("{:?}", fancy_cell.load());
 
     //assert!({ *val == "Adieu" || *val == "Adieu Amigo!" || *val == "Au Revoir!" });
     println!("booyah");
 }
 
-#[test]
+
 fn summing() {
     let bar = Arc::new(std::sync::Barrier::new(1000));
     let fancy_cell = Arc::new(AtomicCell::new(0u64));
 
     let vector = (1..=1000u64)
-        .map(|num| {
+        .map(|_num| {
             let x = fancy_cell.clone();
             let xbar = bar.clone();
             thread::spawn(move || {xbar.wait(); x.fetch_update::<u64, _>(|cell| ((*cell) + 1, None))})
         })
         .collect::<Vec<_>>();
     for x in vector{
-        x.join();
+        _=x.join();
     }
 
     assert_eq!((*fancy_cell.load()), 1000)
