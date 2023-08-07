@@ -1,8 +1,8 @@
 #[deny(clippy::pedantic)]
 use std::marker::PhantomData;
+use std::ptr::{read_volatile, write_volatile};
 use std::sync::atomic::{fence, AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::ptr::{write_volatile, read_volatile};
 
 /* AtomicCell<T> simulates basic atomic operations on any type T. It mimics the behaviour of actual atomics:
 
@@ -140,7 +140,7 @@ impl<T> AtomicCell<T> {
                 - next_next_ptr -> the pointer from the ACNode are at to another ACNode. This pointer will later replace prev_next_pointer and so on... */
                 //TODO ReadVolatile
                 let src = &(*latest).next as *const *mut ACNode<T>;
-                let mut next_next_ptr:*mut ACNode<T> = read_volatile(src);
+                let mut next_next_ptr: *mut ACNode<T> = read_volatile(src);
 
                 /* Checks if the latest ACNode is self-referential. Self-reference marks some "end" in the list.*/
                 if !(next_next_ptr == latest)
@@ -179,8 +179,8 @@ impl<T> AtomicCell<T> {
                                     let drop_this = Box::from_raw(prev_next_ptr);
                                     drop(drop_this); // gonna be explicit here :)
                                                      // Make the first node self-ref, to mark as end.
-                                    //TODO WriteVolatile
-                                    let dst = &mut(*latest).next as *mut *mut ACNode<T>;
+                                                     //TODO WriteVolatile
+                                    let dst = &mut (*latest).next as *mut *mut ACNode<T>;
                                     let write_this = latest;
                                     write_volatile(dst, write_this);
 
@@ -245,17 +245,25 @@ impl<T> AtomicCell<T> {
         }
     }
 
-    /// UNTESTED!
-    pub fn fetch_update<O, F>(&self, func: F) -> Option<O>
+    /// Reads an Arc<T> and stores an Arc<T>. No other thread is guarenteed to have made a store in between the read and store.
+    /// O is the (optional) output of the closure.
+    pub fn fetch_update<O, F>(&self, func: F) -> std::thread::Result<O>
     where
-        F: Fn(Arc<T>) -> (T, Option<O>),
+        F: Fn(Arc<T>) -> (Arc<T>, O),
     {
         loop {
             self.load_counter.fetch_add(1, Ordering::AcqRel);
             let (arg, ptr) = unsafe { self.phantom_double_load() };
 
-            let (updated, output) = func(arg);
-            let to_new = ACNode::new(updated);
+            let (write, output) =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func(arg))) {
+                    Ok(tuple) => (tuple),
+                    Err(panic_message) => {
+                        self.load_counter.fetch_sub(1, Ordering::AcqRel);
+                        return Err(panic_message);
+                    }
+                };
+            let to_new = ACNode::new_from_arc(write);
 
             unsafe {
                 match self.cas(ptr, to_new) {
@@ -264,7 +272,7 @@ impl<T> AtomicCell<T> {
                         fence(Ordering::AcqRel);
                         (*to_new).chained_flag.store(true, Ordering::Release);
                         self.load_counter.fetch_sub(1, Ordering::AcqRel);
-                        return output;
+                        return Ok(output);
                     }
                     Err(_) => {
                         self.load_counter.fetch_sub(1, Ordering::AcqRel);
@@ -333,6 +341,24 @@ impl<T> ACNode<T> {
         let pre = Self {
             next: false_ptr,
             value: Arc::new(value),
+            chained_flag: AtomicBool::new(false),
+        };
+
+        let boxed = Box::new(pre);
+        let correct_ptr = Box::into_raw(boxed);
+
+        unsafe {
+            (*correct_ptr).next = correct_ptr; // next is now ptr to self on heap. Self is "leaked".
+        }
+        correct_ptr
+    }
+
+    fn new_from_arc(value: Arc<T>) -> *mut Self {
+        let false_ptr: *mut Self = std::ptr::null_mut(); // Avoids MaybeUninit
+
+        let pre = Self {
+            next: false_ptr,
+            value,
             chained_flag: AtomicBool::new(false),
         };
 
