@@ -44,8 +44,10 @@ impl<T> AtomicCell<T> {
         /* The ACNode contains a "chained flag" which marks whether a given ACNode is "chained" to its preceeding ACNodes.
         As this is the first ACNode created it should be chained.*/
         unsafe {
+            // Load is relaxable because no other thread accessed it before
             (*(cell.ptr.load(Ordering::Acquire)))
                 .chained_flag
+                // Release is necessary, so that all threads read the updated ptr.
                 .store(true, Ordering::Release);
         }
         cell
@@ -61,8 +63,10 @@ impl<T> AtomicCell<T> {
 
         /* This links the ACNode we just made to the old ACNode. Afterwards the new ACNode is considered "chained" because it points to it predecessor. */
         unsafe {
+            // This is safeguarded by the chained flag. The write becomes visible to other threads after a sync with the fence.
             (*to_acnode).next = old;
-            fence(Ordering::Release);
+            fence(Ordering::AcqRel);
+            // Drop the safeguard of .next TODO NO REORDER WITH FENCE required
             (*to_acnode).chained_flag.store(true, Ordering::Release);
         }
 
@@ -79,11 +83,13 @@ impl<T> AtomicCell<T> {
         /* Marks that we perform a load operation. Since a thread may be stuck between getting the ptr and derefing it no frees must happen while a load is in progress.
         Otherwise the ACNode may be removed from under our feet. */
         self.load_counter.fetch_add(1, Ordering::AcqRel);
+        // Load visibly happens after the fetch_add
         let latest = self.ptr.load(Ordering::Acquire);
         /* .value of the ACNode stores an Arc */
         let ret_val = unsafe { (*latest).value.clone() };
 
         /* Again, free memory if possible. And mark the load operation as completed. */
+        // fetch_sub happens visibly after the load
         if self.load_counter.fetch_sub(1, Ordering::AcqRel) == 1 {
             unsafe {
                 self.free(latest);
@@ -97,14 +103,19 @@ impl<T> AtomicCell<T> {
     pub fn swap(&self, value: T) -> Arc<T> {
         let to_acnode = ACNode::new(value);
 
+        // AcqRel makes sure we get the latest, still "in use" ptr and make our ptr the "in use" new one
         let old = self.ptr.swap(to_acnode, Ordering::AcqRel);
 
         let ret_val;
         unsafe {
+
+            // Because a node visible as "in use" is never deallocated, and we are the only ones with access to this node as not "in use", it must still exist.
             ret_val = (*old).value.clone(); // Simply gets the old ACNode's value.
 
+            // Connect the new ACNode to the older one.
             (*to_acnode).next = old;
-            fence(Ordering::Release);
+            fence(Ordering::AcqRel);
+            // TODO REQUIRE NO REORDER OF FENCES (for other threads too)
             (*to_acnode).chained_flag.store(true, Ordering::Release);
         }
 
@@ -129,6 +140,7 @@ impl<T> AtomicCell<T> {
             true,
             false,
             Ordering::AcqRel,
+            // Failure Acquire means it will always succeed if possible.
             Ordering::Acquire,
         ) {
             /* If the cas on the first ACNode succeeds we can proceed...
@@ -138,7 +150,7 @@ impl<T> AtomicCell<T> {
                 - latest -> the very first pointer (head).
                 - prev_next_ptr -> the pointer with which we arrived at the ACNode we are currently at.
                 - next_next_ptr -> the pointer from the ACNode are at to another ACNode. This pointer will later replace prev_next_pointer and so on... */
-                //TODO ReadVolatile
+                // Volatility forces a fresh read. This read will return the correct value because this thread synced via the AcqRel in compare_exchange.
                 let src = &(*latest).next as *const *mut ACNode<T>;
                 let mut next_next_ptr: *mut ACNode<T> = read_volatile(src);
 
@@ -179,12 +191,15 @@ impl<T> AtomicCell<T> {
                                     let drop_this = Box::from_raw(prev_next_ptr);
                                     drop(drop_this); // gonna be explicit here :)
                                                      // Make the first node self-ref, to mark as end.
-                                                     //TODO WriteVolatile
+                                                     // TODO WriteVolatile
                                     let dst = &mut (*latest).next as *mut *mut ACNode<T>;
                                     let write_this = latest;
                                     write_volatile(dst, write_this);
 
+                                    // Acq to revent inner_thread reordering with the following store.
+                                    // => write visibly happens before the store
                                     fence(Ordering::AcqRel);
+                                    // TODO Check Reorder
                                     (*latest).chained_flag.store(true, Ordering::Release);
                                     break;
                                 } else {
@@ -216,11 +231,13 @@ impl<T> AtomicCell<T> {
                 }
             }
 
-            /* If the cas failed than some other thread is working on it, probably freeing the memory for us. Great! We are done. */
+            /* If the cas failed than some other thread is working on it, freeing the memory for us. Great! We are done. */
             Err(_) => (),
         }
     }
 
+
+    // TODO Inline this
     pub(crate) unsafe fn phantom_double_load(&self) -> (Arc<T>, *mut ACNode<T>) {
         let latest = self.ptr.load(Ordering::Acquire);
         /* .value of the ACNode stores an Arc */
@@ -228,13 +245,12 @@ impl<T> AtomicCell<T> {
         (ret_val, latest)
     }
 
-    /// UNTESTED!
+    /// Tested
     pub(crate) unsafe fn cas(
         &self,
         expected: *mut ACNode<T>,
         new: *mut ACNode<T>,
     ) -> Result<(), ()> {
-        // let new_node = ACNode::new(new);
 
         match self
             .ptr
@@ -247,24 +263,29 @@ impl<T> AtomicCell<T> {
 
     /// Reads an Arc<T> and stores an Arc<T>. No other thread is guarenteed to have made a store in between the read and store.
     /// O is the (optional) output of the closure.
-    pub fn fetch_update<O, F>(&self, func: F) -> std::thread::Result<O>
+    pub fn fetch_update<O, F>(&self, mut func: F) -> std::thread::Result<O>
     where
-        F: Fn(Arc<T>) -> (Arc<T>, O),
+        // Can be FnMut, but it's probably a logic error for you if it isn't also Fn
+        F: FnMut(Arc<T>) -> (Arc<T>, O),
     {
         loop {
             self.load_counter.fetch_add(1, Ordering::AcqRel);
             let (arg, ptr) = unsafe { self.phantom_double_load() };
 
             let (write, output) =
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func(arg))) {
-                    Ok(tuple) => (tuple),
+                // Not my problem if your function panics, (and if its only FnMut fucks up some invariant of yours). I won't let it block the free mechanism of the AtomicCell.
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(||func(arg))) {
+                    Ok(tuple) => tuple,
                     Err(panic_message) => {
+                        // Prevents the "block"
                         self.load_counter.fetch_sub(1, Ordering::AcqRel);
                         return Err(panic_message);
                     }
                 };
+
             let to_new = ACNode::new_from_arc(write);
 
+            // Bash the output of the func against the AtomicCell until it works
             unsafe {
                 match self.cas(ptr, to_new) {
                     Ok(_) => {
@@ -325,7 +346,9 @@ impl<T> Drop for AtomicCell<T> {
     }
 }
 
+// Requires T: Send: If T is not Send but Clone, then it could be unsafely transferred between threads via AtomicCell.
 unsafe impl<T: Send> Send for AtomicCell<T> {}
+// Don't do Sync kids. It's bad for your (mental) health.
 unsafe impl<T: Send + Sync> Sync for AtomicCell<T> {}
 
 pub(crate) struct ACNode<T> {

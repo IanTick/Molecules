@@ -35,6 +35,6 @@ impl<T> MlcVec<T> {
             let mut next_vec = (*vec).clone();
             let output = next_vec.pop();
             (next_vec, Some(output))
-        }).unwrap()
+        }).unwrap();
     }
 }
