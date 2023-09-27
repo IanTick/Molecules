@@ -11,6 +11,20 @@ pub struct MlcMap<K, V> {
     bucket_vec: Arc<AtomicCell<Vec<Bucket<K, V>>>>,
 }
 
+/*
+pub struct MlcMap<K, V> {
+    bucket_line: MlcVec<Bucket<K, V>>
+}
+
+pub struct Bucket<K, V> {
+    contents: MlcVec<Entry<K, V>>
+}
+
+pub struct Entry<K, V> {
+    key: K,
+    value: AtomicCell<V>, // This should be inside an ACell -> Move to wrap the entire entry at bucket level?
+}
+*/
 impl<K, V> MlcMap<K, V> {
     fn get_hash(&self, key: &K) -> usize
     where

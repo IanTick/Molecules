@@ -131,7 +131,7 @@ fn summing() {
         .map(|_num| {
             let x = fancy_cell.clone();
             let xbar = bar.clone();
-            thread::spawn(move || {xbar.wait(); x.fetch_update::<u64, _>(|cell| ((*cell) + 1, None))})
+            thread::spawn(move || {xbar.wait(); x.fetch_update::<(), _>(|cell| (Arc::new((*cell) + 1), ()))})
         })
         .collect::<Vec<_>>();
     for x in vector{
