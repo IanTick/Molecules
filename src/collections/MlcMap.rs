@@ -1,4 +1,5 @@
 use crate::primitives::AtomicCell::*;
+use crate::collections::MlcVec::*;
 #[deny(clippy::pedantic)]
 use std::sync::Arc;
 use std::{
@@ -6,26 +7,25 @@ use std::{
     hash::{Hash, Hasher},
 };
 // ctries or concurrent hamt
-pub struct MlcMap<K, V> {
-    is_creator: bool,
+/*pub struct MlcMap<K, V> {
     bucket_vec: Arc<AtomicCell<Vec<Bucket<K, V>>>>,
 }
+*/
 
-/*
-pub struct MlcMap<K, V> {
-    bucket_line: MlcVec<Bucket<K, V>>
+pub struct AtomicMap<K, V> {
+    bucket_line: AtomicVec<Bucket<K, V>>
 }
 
 pub struct Bucket<K, V> {
-    contents: MlcVec<Entry<K, V>>
+    contents: AtomicVec<Entry<K, V>>
 }
 
 pub struct Entry<K, V> {
     key: K,
     value: AtomicCell<V>, // This should be inside an ACell -> Move to wrap the entire entry at bucket level?
 }
-*/
-impl<K, V> MlcMap<K, V> {
+
+impl<K, V> AtomicMap<K, V> {
     fn get_hash(&self, key: &K) -> usize
     where
         K: Hash + Eq,
@@ -35,23 +35,16 @@ impl<K, V> MlcMap<K, V> {
         hasher_instance.finish() as usize
     }
 
+    // TODO: Set Capacity
     fn new() -> Self {
         Self {
-            is_creator: true,
-            bucket_vec: Arc::new(AtomicCell::new(Vec::new())),
+            bucket_line: AtomicVec::new(),
         }
     }
 
     pub fn new_with_capacity(capacity: usize) -> Self {
-        let mut vector = Vec::with_capacity(capacity);
-
-        for _ in 0..capacity {
-            vector.push(Bucket::new());
-        }
-
         Self {
-            is_creator: true,
-            bucket_vec: Arc::new(AtomicCell::new(vector)),
+            bucket_line: AtomicVec::new_with_capacity(capacity),
         }
     }
 
@@ -60,9 +53,11 @@ impl<K, V> MlcMap<K, V> {
         K: Hash + Eq,
     {
         let hash = self.get_hash(key);
-        let curr_map = self.bucket_vec.load();
-        let spot = hash.checked_rem((*curr_map).len())?;
-        (*curr_map).get(spot)?.get_handle(key)
+
+        let current_bucket_line = self.bucket_line.get_beam();
+        let spot = hash.checked_rem((*current_bucket_line).len())?;
+
+        (*current_bucket_line).get(spot)?.get_handle(key)
     }
 
     pub fn get(&self, key: &K) -> Option<Arc<V>>
@@ -81,7 +76,7 @@ impl<K, V> MlcMap<K, V> {
         Some((*arc).clone())
     }
 
-    pub fn edit(&self, key: &K, value: V) -> Option<()>
+    pub fn write(&self, key: &K, value: V) -> Option<()>
     where
         K: Hash + Eq,
     {
@@ -89,18 +84,43 @@ impl<K, V> MlcMap<K, V> {
         Some(())
     }
 
-    pub fn insert(&self, key: K, value: V) -> Option<()>
+    pub fn insert(&self, key: K, value: V)
     where
         K: Hash + Eq,
     {
-        assert!(self.is_creator);
+
         let hash = self.get_hash(&key);
-        let curr_map = self.bucket_vec.load();
-        let spot = hash.checked_rem((*curr_map).len())?;
-        (*curr_map).get(spot)?.insert(key, value);
-        Some(())
+        let mut tries = Vec::new();
+        
+        // TODO implemennt stage, unstage, commit
+        let _output = self.bucket_line.update(|current_bucket_line|
+        {
+            let spot = std::ops::Rem::rem(hash, (*current_bucket_line).len());
+            let insert_here = current_bucket_line[spot].clone();
+            
+            // Tells the bucket to soon receive a new entry
+            // use key_hash, value_hash instead ?
+            (*insert_here).stage(&key, &value);
+            tries.push(insert_here);
+            (current_bucket_line, ())
+        }
+        )
+        // Assume no panic
+        .unwrap();
+
+
+        let success = tries.pop();
+        
+        success.commit(key, value);
+
+        for fail in tries{
+            fail.unstage(&key, &value);
+        }
+
+        todo!()
     }
 
+    /* TODO: implement insert_raw
     fn insert_raw(&self, to_insert: Arc<(K, AtomicCell<V>)>) -> Option<()>
     where
         K: Hash + Eq,
@@ -114,27 +134,32 @@ impl<K, V> MlcMap<K, V> {
         Some(())
     }
 
-    pub fn remove(&self, key: &K) -> Option<()>
+    */
+
+    pub fn remove(&self, key: &K) -> Option<V>
     where
         K: Hash + Eq,
     {
-        assert!(self.is_creator);
+        use std::ops::Rem;
         let hash = self.get_hash(key);
-        let curr_map = self.bucket_vec.load();
-        let spot = hash.checked_rem((*curr_map).len())?;
-        (*curr_map).get(spot)?.remove(key);
-        Some(())
+        let current_bucket_line = self.bucket_line.get_beam();
+        let spot = hash.rem(current_bucket_line.len());
+        // TODO make bucket.remove return the value
+        let v = (*current_bucket_line).get(spot)?.remove(key);
+        Some(v)
     }
 
     pub fn get_iter(&self) -> MapIter<K, V> {
         MapIter {
-            snap: self.bucket_vec.load(),
+            snap: self.bucket_line.get_beam(),
             curr_bucket: None,
             curr_map_index: 0,
             curr_b_index: 0,
         }
     }
 
+
+    // TODO continue here
     pub fn resize(&self) -> Option<()>
     where
         K: Hash + Eq,
@@ -167,7 +192,7 @@ impl<K, V> MlcMap<K, V> {
 }
 
 pub struct MapIter<K, V> {
-    snap: Arc<Vec<Bucket<K, V>>>,
+    snap: Arc<Vec<Arc<Bucket<K, V>>>>,
     curr_bucket: Option<Arc<Vec<Arc<(K, AtomicCell<V>)>>>>,
     curr_map_index: usize,
     curr_b_index: usize,

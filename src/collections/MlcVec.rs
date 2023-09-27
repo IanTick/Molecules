@@ -4,15 +4,32 @@ use std::sync::Arc;
 
 
 // TODO: Add Iterator support
-pub struct MlcVec<T> {
+pub struct AtomicVec<T> {
     pub(crate) beam: AtomicCell<Vec<Arc<T>>>,
 }
 
-impl<T> MlcVec<T> {
+impl<T> AtomicVec<T> {
     pub fn new() -> Self {
         Self {
             beam: AtomicCell::new(Vec::new()),
         }
+    }
+
+    pub fn new_with_capacity(cap: usize) -> Self {
+        Self { 
+            beam: AtomicCell::new(Vec::with_capacity(cap))
+         }
+    }
+
+    pub fn get_beam(&self) -> Arc<Vec<Arc<T>>> {
+        self.beam.load()
+    }
+
+    pub fn update<O, F>(&self, func: F) -> std::thread::Result<O> 
+    where
+    F: FnMut(Arc<Vec<Arc<T>>>) -> (Arc<Vec<Arc<T>>>, O)
+    {
+        self.beam.fetch_update(func)
     }
 
     // MlcVec does not expose a write handle to individual T's. Use Wrappers such as AtomicCell or Mutex to modify through shared references.
