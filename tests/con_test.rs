@@ -1,6 +1,6 @@
-use libmol::collections::MlcMap::*;
 use libmol::primitives::AtomicCell::*;
 use std::{sync::Arc, thread};
+
 
 fn main(){
     summing();
@@ -32,10 +32,6 @@ where
     }
 }
 
-#[test]
-fn it_works() {
-    single_test(); // Ignore this.
-}
 
 #[test]
 fn acell_store() {

@@ -1,4 +1,4 @@
-use crate::primitives::AtomicCell::*;
+/* use crate::primitives::AtomicCell::*;
 use crate::collections::MlcVec::*;
 #[deny(clippy::pedantic)]
 use std::sync::Arc;
@@ -359,3 +359,4 @@ pub fn single_test() {
     println!("Tada: {:?}", fancycell.swap(68u8));
     println!("Voila: {:?}", fancycell.load());
 }
+*/

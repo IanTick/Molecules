@@ -1,3 +1,4 @@
+use std::cell::UnsafeCell;
 #[deny(clippy::pedantic)]
 use std::marker::PhantomData;
 use std::ptr::{read_volatile, write_volatile};
@@ -65,7 +66,7 @@ impl<T> AtomicCell<T> {
         /* This links the ACNode we just made to the old ACNode. Afterwards the new ACNode is considered "chained" because it points to it predecessor. */
         unsafe {
             // This is safeguarded by the chained flag. The write becomes visible to other threads after a sync with the fence.
-            (*to_acnode).next = old;
+            *(*to_acnode).next.get() = old;
             fence(Ordering::AcqRel);
             // Drop the safeguard of .next TODO NO REORDER WITH FENCE required
             (*to_acnode).chained_flag.store(true, Ordering::Release);
@@ -87,7 +88,7 @@ impl<T> AtomicCell<T> {
         // Load visibly happens after the fetch_add
         let latest = self.ptr.load(Ordering::Acquire);
         /* .value of the ACNode stores an Arc */
-        let ret_val = unsafe { (*latest).value.clone() };
+        let ret_val = unsafe { (*(*latest).value.get()).clone() };
 
         /* Again, free memory if possible. And mark the load operation as completed. */
         // fetch_sub happens visibly after the load
@@ -111,10 +112,10 @@ impl<T> AtomicCell<T> {
         unsafe {
 
             // Because a node visible as "in use" is never deallocated, and we are the only ones with access to this node as not "in use", it must still exist.
-            ret_val = (*old).value.clone(); // Simply gets the old ACNode's value.
+            ret_val = (*((*old).value.get())).clone(); // Simply gets the old ACNode's value.
 
             // Connect the new ACNode to the older one.
-            (*to_acnode).next = old;
+            *(*to_acnode).next.get() = old;
             fence(Ordering::AcqRel);
             // TODO REQUIRE NO REORDER OF FENCES (for other threads too)
             (*to_acnode).chained_flag.store(true, Ordering::Release);
@@ -151,9 +152,7 @@ impl<T> AtomicCell<T> {
                 - latest -> the very first pointer (head).
                 - prev_next_ptr -> the pointer with which we arrived at the ACNode we are currently at.
                 - next_next_ptr -> the pointer from the ACNode are at to another ACNode. This pointer will later replace prev_next_pointer and so on... */
-                // Volatility forces a fresh read. This read will return the correct value because this thread synced via the AcqRel in compare_exchange.
-                let src = &(*latest).next as *const *mut ACNode<T>;
-                let mut next_next_ptr: *mut ACNode<T> = read_volatile(src);
+                let mut next_next_ptr: *mut ACNode<T> = *(*latest).next.get();
 
                 /* Checks if the latest ACNode is self-referential. Self-reference marks some "end" in the list.*/
                 if !(next_next_ptr == latest)
@@ -183,9 +182,7 @@ impl<T> AtomicCell<T> {
                             // Read the next ptr of the node
                             // Note: We never deref next_next_ptr! Only as prev_next_ptr in the following iteration!
                             Ok(_) => {
-                                //TODO ReadVolatile
-                                let src = &(*prev_next_ptr).next as *const *mut ACNode<T>;
-                                next_next_ptr = read_volatile(src);
+                                next_next_ptr = *(*prev_next_ptr).next.get();
 
                                 if next_next_ptr == prev_next_ptr {
                                     // This node is self-referential. Drop it! As it was the last node, we are done.
@@ -193,9 +190,11 @@ impl<T> AtomicCell<T> {
                                     drop(drop_this); // gonna be explicit here :)
                                                      // Make the first node self-ref, to mark as end.
                                                      // TODO WriteVolatile
-                                    let dst = &mut (*latest).next as *mut *mut ACNode<T>;
+                                    // let dst = &mut (*latest).next as *mut *mut ACNode<T>;
+                                    let dst = (*latest).next.get();
                                     let write_this = latest;
-                                    write_volatile(dst, write_this);
+                                    // write_volatile(dst, write_this);
+                                    *(dst) = write_this;
 
                                     // Acq to revent inner_thread reordering with the following store.
                                     // => write visibly happens before the store
@@ -212,7 +211,7 @@ impl<T> AtomicCell<T> {
                             }
                             Err(_) => {
                                 // This node is not chained, we cant drop it and we cant proceed. Therefore we "bridge" to it for future frees. Then we are done.
-                                (*latest).next = prev_next_ptr;
+                                *(*latest).next.get() = prev_next_ptr;
                                 fence(Ordering::AcqRel);
                                 (*latest).chained_flag.store(true, Ordering::Release);
                                 break;
@@ -242,7 +241,7 @@ impl<T> AtomicCell<T> {
     pub(crate) unsafe fn phantom_double_load(&self) -> (Arc<T>, *mut ACNode<T>) {
         let latest = self.ptr.load(Ordering::Acquire);
         /* .value of the ACNode stores an Arc */
-        let ret_val = unsafe { (*latest).value.clone() };
+        let ret_val = unsafe { (*(*latest).value.get()).clone() };
         (ret_val, latest)
     }
 
@@ -290,7 +289,7 @@ impl<T> AtomicCell<T> {
             unsafe {
                 match self.cas(ptr, to_new) {
                     Ok(_) => {
-                        (*to_new).next = ptr;
+                        *(*to_new).next.get() = ptr;
                         fence(Ordering::AcqRel);
                         (*to_new).chained_flag.store(true, Ordering::Release);
                         self.load_counter.fetch_sub(1, Ordering::AcqRel);
@@ -314,11 +313,13 @@ impl<T: Eq> AtomicCell<T> {
         self.load_counter.fetch_add(1, Ordering::AcqRel);
         let latest = self.ptr.load(Ordering::Acquire);
 
+        
+
         unsafe {
-            if *(*latest).value == *expected {
+            if **(*latest).value.get() == *expected {
                 match self.cas(latest, to_new) {
                     Ok(_) => {
-                        (*to_new).next = latest;
+                        *(*to_new).next.get() = latest;
                         fence(Ordering::AcqRel);
                         (*to_new).chained_flag.store(true, Ordering::Release);
                         self.load_counter.fetch_sub(1, Ordering::AcqRel);
@@ -353,8 +354,8 @@ unsafe impl<T: Send> Send for AtomicCell<T> {}
 unsafe impl<T: Send + Sync> Sync for AtomicCell<T> {}
 
 pub(crate) struct ACNode<T> {
-    next: *mut Self,
-    value: Arc<T>,
+    next: UnsafeCell<*mut Self>,
+    value: UnsafeCell<Arc<T>>,
     chained_flag: AtomicBool,
 }
 
@@ -363,8 +364,8 @@ impl<T> ACNode<T> {
         let false_ptr: *mut Self = std::ptr::null_mut(); // Avoids MaybeUninit
 
         let pre = Self {
-            next: false_ptr,
-            value: Arc::new(value),
+            next: UnsafeCell::from(false_ptr),
+            value: UnsafeCell::from(Arc::new(value)),
             chained_flag: AtomicBool::new(false),
         };
 
@@ -372,7 +373,7 @@ impl<T> ACNode<T> {
         let correct_ptr = Box::into_raw(boxed);
 
         unsafe {
-            (*correct_ptr).next = correct_ptr; // next is now ptr to self on heap. Self is "leaked".
+            * (*correct_ptr).next.get_mut() = correct_ptr; // next is now ptr to self on heap. Self is "leaked".
         }
         correct_ptr
     }
@@ -381,8 +382,8 @@ impl<T> ACNode<T> {
         let false_ptr: *mut Self = std::ptr::null_mut(); // Avoids MaybeUninit
 
         let pre = Self {
-            next: false_ptr,
-            value,
+            next: UnsafeCell::from(false_ptr),
+            value: UnsafeCell::from(value),
             chained_flag: AtomicBool::new(false),
         };
 
@@ -390,7 +391,7 @@ impl<T> ACNode<T> {
         let correct_ptr = Box::into_raw(boxed);
 
         unsafe {
-            (*correct_ptr).next = correct_ptr; // next is now ptr to self on heap. Self is "leaked".
+           * (*correct_ptr).next.get_mut() = correct_ptr; // next is now ptr to self on heap. Self is "leaked".
         }
         correct_ptr
     }
@@ -398,7 +399,7 @@ impl<T> ACNode<T> {
     fn into_inner(ptr: *mut Self) -> Result<T, Arc<T>> {
         unsafe {
             let mut boxed = Box::from_raw(ptr);
-            let arcyboi = boxed.as_ref().value.clone();
+            let arcyboi = (*(boxed.as_ref().value.get())).clone();
             drop(boxed);
             return Arc::try_unwrap(arcyboi);
         }
