@@ -160,34 +160,53 @@ impl<K, V> AtomicMap<K, V> {
 
 
     // TODO continue here
-    pub fn resize(&self) -> Option<()>
+    // Well fuck.
+
+    // Can resize no problemo through a shared ref, but but 1/2 Bucket_entries may be at the wrong place.
+    
+
+    // Possible? But bad.
+    // Practical resize with a warn flag? => exclusive resize access.
+    // Fetch_update the bucket_line with double length.
+    // Set double true
+    // Iterate over the old buckets and move wrongly placed entries.
+    // (First copy the entry, then remove it.)
+    // Once finished turn off warn flag.
+    // During warn flag:
+    // reads ask a .get on double the calculated idx.
+    // Inserts check len, insert accordingly and check len again, if different undo and retry
+    // removes see if it would move, if not, they remove, otherwise they must be postponed.
+    // Turn off warn flag => do postponed removes
+
+    // Following is true for all resizes => resizes must lock down the data structure, therefore require &mut, actually arcs to buckets may be held? => Must not expose internals => arc to the internals (other than a value, which is fine) require a holding a ref to the map aswewll => &mut means no arcs to internals
+    // If an insert sleeps between identifying a bucket and inserting the value, and a resize comes in and completes, then the insert happens 50% (for each complete resize) of the time at the wrong place 
+    pub fn resize(&mut self) -> Option<()>
     where
         K: Hash + Eq,
     {
-        let mut len = self.bucket_vec.load().len();
-        match len {
-            0 => len = 1,
-            _ => len *= 2,
+        let mut current_bucket_line = self.bucket_line.get_beam();
+        
+        let new_length = match current_bucket_line.len() {
+            0 => 1,
+            l => l * 2,
+        };
+
+        let mut new_bucket_line = AtomicVec::new_with_capacity(new_length);
+        
+        for _ in 0..new_length {
+            new_bucket_line.push(Bucket::new());
         }
 
-        let mut new_bucket_vec = Vec::with_capacity(len);
-        for _ in 0..len {
-            new_bucket_vec.push(Bucket::new());
-        }
 
         for pair in self.get_iter() {
-            let spot = self.get_hash(&pair.0).checked_rem(new_bucket_vec.len())?;
-            new_bucket_vec.get(spot)?.insert_raw(pair);
-        }
-        (*self.bucket_vec).store(new_bucket_vec);
-        Some(())
-    }
+            let spot = self.get_hash(&pair.0).checked_rem(new_length)?;
+            // This doesnt work
+            new_bucket_line.get(spot)?.stage(&pair.0, &pair.1);
+        };
 
-    pub fn new_editor(&self) -> Self {
-        Self {
-            is_creator: false,
-            bucket_vec: self.bucket_vec.clone(),
-        }
+        // Something, something, cas
+        (*self.bucket_line).store(new_bucket_vec);
+        Some(())
     }
 }
 

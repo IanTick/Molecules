@@ -23,6 +23,7 @@ pub struct AtomicCell<T> {
     Swaps do not load. */
     load_counter: AtomicUsize,
     /* An 'AtomicPtr' to the latest stored value of T. The 'ACNode<T>' contains the value and other important information for freeing memory.*/
+    // TODO Enforce Atomic Alignment
     ptr: AtomicPtr<ACNode<T>>,
     /* When 'AtomicCell<T>' is dropped then so is 'ACNode<T>' and hence some T. This has to be known by the compiler as
     'AtomicCell<T>' does - itself - not "hold" an instance of T */
