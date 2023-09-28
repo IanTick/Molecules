@@ -138,12 +138,17 @@ impl<T> AtomicCell<T> {
         /* Remember the "chained flag" of ACNode? It signals whether an ACNode is fully initialized. To perform any operation we "unchain" the ACNode
         thereby guranteering that is was chained and that no other thread can operate on it. */
 
+        // @MIRI COMPLAINS STACKED BORROWS:
+        /*
+        (AcqRel, Acquire) => intrinsics::atomic_cxchg_acqrel_acquire(dst, old, new),
+     |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not granting access to tag <96258> because that would remove [Unique for <96163>] which is weakly protected because it is an argument of call 44621
+        
+         */
         match (*latest).chained_flag.compare_exchange(
             true,
             false,
             Ordering::AcqRel,
-            // Failure Acquire means it will always succeed if possible.
-            Ordering::Acquire,
+            Ordering::Acquire
         ) {
             /* If the cas on the first ACNode succeeds we can proceed...
             Remember: "latest" is the pointer to the very first ("latest") ACNode. */

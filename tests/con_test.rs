@@ -1,9 +1,8 @@
-use libmol::primitives::AtomicCell::*;
+use mlc::primitives::AtomicCell::*;
 use std::{sync::Arc, thread};
 
 
 fn main(){
-    summing();
     println!("Hello from con_test main!");
 }
 
@@ -118,7 +117,7 @@ fn acell_all() {
     println!("booyah");
 }
 
-
+#[test]
 fn summing() {
     let bar = Arc::new(std::sync::Barrier::new(1000));
     let fancy_cell = Arc::new(AtomicCell::new(0u64));
