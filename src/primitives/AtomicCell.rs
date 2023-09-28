@@ -5,6 +5,7 @@ use std::ptr::{read_volatile, write_volatile};
 use std::sync::atomic::{fence, AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+
 /* AtomicCell<T> simulates basic atomic operations on any type T. It mimics the behaviour of actual atomics:
 
                 |              |                |
@@ -374,13 +375,15 @@ impl<T> ACNode<T> {
             chained_flag: AtomicBool::new(false),
         };
 
+        // MIRI: THIS APPEARS TO "FALSELY" CREATE A NO ALIAS POINTER 
         let boxed = Box::new(pre);
         let correct_ptr = Box::into_raw(boxed);
-
+        
         unsafe {
             * (*correct_ptr).next.get_mut() = correct_ptr; // next is now ptr to self on heap. Self is "leaked".
-        }
+        
         correct_ptr
+        }
     }
 
     fn new_from_arc(value: Arc<T>) -> *mut Self {
@@ -392,8 +395,8 @@ impl<T> ACNode<T> {
             chained_flag: AtomicBool::new(false),
         };
 
-        let boxed = Box::new(pre);
-        let correct_ptr = Box::into_raw(boxed);
+        let cell = UnsafeCell::from(pre);
+        let correct_ptr = UnsafeCell::raw_get(&cell as *const UnsafeCell<ACNode<T>>);
 
         unsafe {
            * (*correct_ptr).next.get_mut() = correct_ptr; // next is now ptr to self on heap. Self is "leaked".
