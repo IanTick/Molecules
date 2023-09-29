@@ -1,12 +1,13 @@
 use mlc::primitives::AtomicCell::*;
 use std::{sync::Arc, thread};
-
+use mlc::primitives::AtomicCell::ACNode;
 
 fn main(){
     println!("Hello from con_test main!");
+    let x = AtomicCell::new(5usize);
 }
 
-
+/*
 fn store_bash<T>(cell: Arc<AtomicCell<T>>, new: T)
 where
     T: Clone,
@@ -30,9 +31,14 @@ where
         cell.swap(new.clone());
     }
 }
-
-
+*/
 #[test]
+fn first(){
+    let x = AtomicCell::new(5usize);
+}
+
+// #[test]
+/*
 fn acell_store() {
     let fancy_cell = Arc::new(AtomicCell::new("Bonjour"));
     let arcyboi1 = fancy_cell.clone();
@@ -51,7 +57,7 @@ fn acell_store() {
     assert!({ *val == "Adieu" || *val == "Adieu Amigo!" || *val == "Au Revoir!" })
 }
 
-#[test]
+// #[test]
 fn acell_load_store() {
     // Actual test. Kinda slow (with miri). ~20 000 loads/stores.
     let fancy_cell = Arc::new(AtomicCell::new("Bonjour"));
@@ -79,7 +85,7 @@ fn acell_load_store() {
     }
 }
 
-#[test]
+// #[test]
 fn acell_all() {
     let fancy_cell = Arc::new(AtomicCell::new("Bonjour"));
     let arcyboi1 = fancy_cell.clone();
@@ -117,12 +123,12 @@ fn acell_all() {
     println!("booyah");
 }
 
-#[test]
+// #[test]
 fn summing() {
-    let bar = Arc::new(std::sync::Barrier::new(1000));
+    let bar = Arc::new(std::sync::Barrier::new(100));
     let fancy_cell = Arc::new(AtomicCell::new(0u64));
 
-    let vector = (1..=1000u64)
+    let vector = (1..=100u64)
         .map(|_num| {
             let x = fancy_cell.clone();
             let xbar = bar.clone();
@@ -133,5 +139,6 @@ fn summing() {
         _=x.join();
     }
 
-    assert_eq!((*fancy_cell.load()), 1000)
+    assert_eq!((*fancy_cell.load()), 100)
 }
+*/

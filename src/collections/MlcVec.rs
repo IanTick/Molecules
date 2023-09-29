@@ -1,14 +1,14 @@
 #[deny(clippy::pedantic)]
 use crate::primitives::AtomicCell::*;
-use std::sync::Arc;
+use std::{sync::Arc, fmt::Debug};
 
 
 // TODO: Add Iterator support
-pub struct AtomicVec<T> {
+pub struct AtomicVec<T: Debug> {
     pub(crate) beam: AtomicCell<Vec<Arc<T>>>,
 }
 
-impl<T> AtomicVec<T> {
+impl<T: Debug> AtomicVec<T> {
     pub fn new() -> Self {
         Self {
             beam: AtomicCell::new(Vec::new()),
