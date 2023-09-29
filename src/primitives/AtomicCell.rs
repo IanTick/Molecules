@@ -1,6 +1,5 @@
 use std::borrow::Borrow;
 use std::cell::UnsafeCell;
-use std::fmt::Debug;
 #[deny(clippy::pedantic)]
 use std::marker::PhantomData;
 use std::sync::atomic::{fence, AtomicBool, AtomicPtr, AtomicUsize, Ordering};
@@ -22,21 +21,21 @@ AtomicCell<u64> | .store(u64)  | .load()        | .swap(u64)
 Note that T may or may not be 'Copy'. To avoid extra allocation only an Arc<T> is returned. If T is 'Clone' an owned
 return value is trivial. */
 
-#[derive(Debug)]
-pub struct AtomicCell<T: Debug> {
+
+pub struct AtomicCell<T> {
     /* How many loads are currently in progress. After a load operation is finished it can decrement this value again.
     Swaps do not load. */
     load_counter: AtomicUsize,
     /* An 'AtomicPtr' to the latest stored value of T. The 'ACNode<T>' contains the value and other important information for freeing memory.*/
     // TODO Enforce Atomic Alignment
-    ptr: AtomicPtr<ManuallyDrop<ACNode<T>>>,
+    ptr: AtomicPtr<ACNode<T>>,
     /* When 'AtomicCell<T>' is dropped then so is 'ACNode<T>' and hence some T. This has to be known by the compiler as
     'AtomicCell<T>' does - itself - not "hold" an instance of T */
     _marker: PhantomData<ACNode<T>>,
 }
 
 /* No assumptions about T is made. (As of right now it still need to be 'Sized') */
-impl<T: Debug> AtomicCell<T> {
+impl<T> AtomicCell<T> {
     /* Simply constructs a new 'AtomicCell<T>', it obviously takes ownership of values. From creation to destruction there must ALWAYS
     be a valid T stored inside the AtomicCell. */
     pub fn new(value: T) -> Self {
@@ -77,11 +76,12 @@ impl<T: Debug> AtomicCell<T> {
         }
 
         /* Lastly it checks if freeing of memory can be done. */
-        /* MIRI: PUT BACK IN if self.load_counter.load(Ordering::Acquire) == 0 {
-            unsafe {
-                self.free(to_acnode);
-            }
-        }*/
+        // TODO MIRI WHY IS THIS DANGLE
+        //if self.load_counter.load(Ordering::Acquire) == 0 {
+        //    unsafe {
+        //        self.free(to_acnode);
+        //    }
+        //}
     }
 
     /* Loading is a very simple task. It simply follows the 'AtomicPtr' and reads the value stored in the current ACNode. Loads will always only get the latest value. */
@@ -96,11 +96,11 @@ impl<T: Debug> AtomicCell<T> {
 
         /* Again, free memory if possible. And mark the load operation as completed. */
         // fetch_sub happens visibly after the load
-        if self.load_counter.fetch_sub(1, Ordering::AcqRel) == 1 {
-            unsafe {
-                self.free(latest);
-            }
-        }
+        // if self.load_counter.fetch_sub(1, Ordering::AcqRel) == 1 {
+        //    unsafe {
+        //        self.free(latest);
+        //    }
+        // }
         ret_val
     }
 
@@ -138,7 +138,7 @@ impl<T: Debug> AtomicCell<T> {
     It is marked as unsafe since it uses a raw pointer argument and requires that no threads hold pointers to the given ACNodes predecessors!
     -> Guaranteed by load_counter.
     Not public! */
-    unsafe fn free(&self, latest: *mut ManuallyDrop<ACNode<T>>) {
+    unsafe fn free(&self, latest: *mut ACNode<T>) {
         /* Remember the "chained flag" of ACNode? It signals whether an ACNode is fully initialized. To perform any operation we "unchain" the ACNode
         thereby guranteering that is was chained and that no other thread can operate on it. */
 
@@ -161,7 +161,7 @@ impl<T: Debug> AtomicCell<T> {
                 - latest -> the very first pointer (head).
                 - prev_next_ptr -> the pointer with which we arrived at the ACNode we are currently at.
                 - next_next_ptr -> the pointer from the ACNode are at to another ACNode. This pointer will later replace prev_next_pointer and so on... */
-                let mut next_next_ptr: *mut ManuallyDrop<ACNode<T>> = *(*latest).next.get();
+                let mut next_next_ptr: *mut ACNode<T> = *(*latest).next.get();
 
                 /* Checks if the latest ACNode is self-referential. Self-reference marks some "end" in the list.*/
                 if !(next_next_ptr == latest)
@@ -196,9 +196,9 @@ impl<T: Debug> AtomicCell<T> {
                                 if next_next_ptr == prev_next_ptr {
                                     // This node is self-referential. Drop it! As it was the last node, we are done.
                                     
-                                    ManuallyDrop::drop(&mut *prev_next_ptr);
-                                    // let drop_this = Box::from_raw(prev_next_ptr);
-                                    // drop(drop_this); // gonna be explicit here :)
+                                    // ManuallyDrop::drop(&mut *prev_next_ptr);
+                                    let drop_this = Box::from_raw(prev_next_ptr);
+                                    drop(drop_this); // gonna be explicit here :)
                                                      // Make the first node self-ref, to mark as end.
                                     // let dst = &mut (*latest).next as *mut *mut ACNode<T>;
                                     let dst = (*latest).next.get();
@@ -214,9 +214,9 @@ impl<T: Debug> AtomicCell<T> {
                                     break;
                                 } else {
                                     // This node has a next. Drop this node and proceed with its next ptr.
-                                    ManuallyDrop::drop(&mut * prev_next_ptr);  
-                                    // let drop_this = Box::from_raw(prev_next_ptr);
-                                    // drop(drop_this); // gonna be explicit here :)
+                                    // ManuallyDrop::drop(&mut * prev_next_ptr);  
+                                    let drop_this = Box::from_raw(prev_next_ptr);
+                                    drop(drop_this); // gonna be explicit here :)
                                     prev_next_ptr = next_next_ptr;
                                 }
                             }
@@ -249,7 +249,7 @@ impl<T: Debug> AtomicCell<T> {
 
 
     // TODO Inline this
-    pub(crate) unsafe fn phantom_double_load(&self) -> (Arc<T>, *mut ManuallyDrop<ACNode<T>>) {
+    pub(crate) unsafe fn phantom_double_load(&self) -> (Arc<T>, *mut ACNode<T>) {
         let latest = self.ptr.load(Ordering::Acquire);
         /* .value of the ACNode stores an Arc */
         let ret_val = unsafe { (*(*latest).value.get()).clone() };
@@ -259,8 +259,8 @@ impl<T: Debug> AtomicCell<T> {
     /// Tested
     pub(crate) unsafe fn cas(
         &self,
-        expected: *mut ManuallyDrop<ACNode<T>>,
-        new: *mut ManuallyDrop<ACNode<T>>,
+        expected: *mut ACNode<T>,
+        new: *mut ACNode<T>,
     ) -> Result<(), ()> {
 
         match self
@@ -308,8 +308,8 @@ impl<T: Debug> AtomicCell<T> {
                     }
                     Err(_) => {
                         self.load_counter.fetch_sub(1, Ordering::AcqRel);
-                        ManuallyDrop::drop(&mut *to_new);
-                        // drop(Box::from_raw(to_new));
+                        // ManuallyDrop::drop(&mut *to_new);
+                        drop(Box::from_raw(to_new));
                         continue;
                     }
                 }
@@ -318,7 +318,7 @@ impl<T: Debug> AtomicCell<T> {
     }
 }
 
-impl<T: Eq + Debug> AtomicCell<T> {
+impl<T: Eq> AtomicCell<T> {
     pub fn cas_by_eq(&self, expected: &T, new: T) -> Result<(), ()> {
         let to_new = ACNode::new(new);
 
@@ -347,36 +347,39 @@ impl<T: Eq + Debug> AtomicCell<T> {
     }
 }
 
-impl<T: Debug> Drop for AtomicCell<T> {
+impl<T> Drop for AtomicCell<T> {
     fn drop(&mut self) {
         // No reference to AtomicCell exists, since its dropping.
-        // MIRI: PUT BACK IN self.load(); // Drops all but the current ACNode (Load counter = 0) => call to free
-        println!("{:?}", &self);
+        // self.load(); // Drops all but the current ACNode (Load counter = 0) => call to free
+        unsafe {
+            // MIRI FREE LOGIC F'D UP
+            self.free(*(*self.ptr.load(Ordering::Acquire)).next.get());
+        }
         let latest = self.ptr.load(Ordering::Acquire);
         unsafe {
             // Manually drop the latest node.
-            ManuallyDrop::drop(&mut *latest);
-            // let boxed_last_node = Box::from_raw(latest);
-            // drop(boxed_last_node);
+            // ManuallyDrop::drop(&mut *latest);
+            let boxed_last_node = Box::from_raw(latest);
+            drop(boxed_last_node);
         }
     }
 }
 
 // Requires T: Send: If T is not Send but Clone, then it could be unsafely transferred between threads via AtomicCell.
-unsafe impl<T: Send + Debug> Send for AtomicCell<T> {}
+unsafe impl<T: Send> Send for AtomicCell<T> {}
 // Don't do Sync kids. It's bad for your (mental) health.
-unsafe impl<T: Send + Sync + Debug> Sync for AtomicCell<T> {}
+unsafe impl<T: Send + Sync> Sync for AtomicCell<T> {}
 
-#[derive(Debug)]
-pub struct ACNode<T: Debug> {
-    next: UnsafeCell<*mut ManuallyDrop<Self>>,
+
+pub struct ACNode<T> {
+    next: UnsafeCell<*mut Self>,
     value: UnsafeCell<Arc<T>>,
     chained_flag: AtomicBool,
 }
 
-impl<T: Debug> ACNode<T> {
-    pub fn new(value: T) -> *mut ManuallyDrop<Self> {
-        let false_ptr: *mut ManuallyDrop<Self> = std::ptr::null_mut(); // Avoids MaybeUninit
+impl<T> ACNode<T> {
+    pub fn new(value: T) -> *mut Self {
+        let false_ptr: *mut Self = std::ptr::null_mut(); // Avoids MaybeUninit
 
         let pre = Self {
             next: UnsafeCell::from(false_ptr),
@@ -386,22 +389,24 @@ impl<T: Debug> ACNode<T> {
     
         // MIRI: THIS APPEARS TO "FALSELY" CREATE A NO ALIAS POINTER
         // Box::into_raw(Box::new(x))
-        let manual = ManuallyDrop::new(pre);
-        let cell = Box::into_raw(Box::new(UnsafeCell::new(manual)));
+        // let manual = ManuallyDrop::new(pre);
+        // let cell = Box::into_raw(Box::new(UnsafeCell::new(manual)));
+        let x = Box::into_raw(Box::new(UnsafeCell::new(pre)));
+ 
+
         
-        // let correct_ptr = (*cell).get();
         
         unsafe {
-            let correct_ptr = (*cell).get();
+            let correct_ptr = (*x).get();
             * (*correct_ptr).next.get_mut() = correct_ptr; // next is now ptr to self on heap. Self is "leaked".
         
-        println!("{:?}, {:?}", *correct_ptr, correct_ptr);
+        
         correct_ptr
         }
     } 
 
-   fn new_from_arc(value: Arc<T>) -> *mut ManuallyDrop<Self> {
-        let false_ptr: *mut ManuallyDrop<Self> = std::ptr::null_mut(); // Avoids MaybeUninit
+   fn new_from_arc(value: Arc<T>) -> *mut Self{
+        let false_ptr: *mut Self = std::ptr::null_mut(); // Avoids MaybeUninit
 
         let pre = Self {
             next: UnsafeCell::from(false_ptr),
@@ -409,13 +414,14 @@ impl<T: Debug> ACNode<T> {
             chained_flag: AtomicBool::new(false),
         };
 
-        let man = ManuallyDrop::new(pre);
-        let cell = Box::into_raw(Box::new(UnsafeCell::new(man)));
         
+        //let man = ManuallyDrop::new(pre);
+        //let cell = Box::into_raw(Box::new(UnsafeCell::new(man)));
+        let x = Box::into_raw(Box::new(UnsafeCell::new(pre)));
         
         
         unsafe {
-            let correct_ptr = (*cell).get();
+            let correct_ptr = (*x).get();
 
            * (*correct_ptr).next.get_mut() = correct_ptr; // next is now ptr to self on heap. Self is "leaked".
         

@@ -4,10 +4,10 @@ use mlc::primitives::AtomicCell::ACNode;
 
 fn main(){
     println!("Hello from con_test main!");
-    let x = AtomicCell::new(5usize);
+    let _x = AtomicCell::new(5usize);
 }
 
-/*
+
 fn store_bash<T>(cell: Arc<AtomicCell<T>>, new: T)
 where
     T: Clone,
@@ -31,40 +31,29 @@ where
         cell.swap(new.clone());
     }
 }
-*/
+
 #[test]
 fn first(){
-    let x = AtomicCell::new(5usize);
-}
+        let x = AtomicCell::new(5usize);
+        x.store(6);
+        x.store(7);
+    }
 
-// #[test]
-/*
+#[test]
 fn acell_store() {
     let fancy_cell = Arc::new(AtomicCell::new("Bonjour"));
-    let arcyboi1 = fancy_cell.clone();
-    let arcyboi2 = fancy_cell.clone();
-    let arcyboi3 = fancy_cell.clone();
-    let w1 = thread::spawn(move || store_bash(arcyboi1, "Adieu!"));
-    let w2 = thread::spawn(move || store_bash(arcyboi2, "Adieu Amigo!"));
-    let w3 = thread::spawn(move || store_bash(arcyboi3, "Au Revoir!"));
 
-    _=w1.join();
-    _=w2.join();
-    _=w3.join();
-
-    let val = fancy_cell.load();
-
-    assert!({ *val == "Adieu" || *val == "Adieu Amigo!" || *val == "Au Revoir!" })
+    (0..10).map(|_|{ let cell = fancy_cell.clone(); thread::spawn(move||{for _ in 0..10{cell.store("Bonjour")}})}).collect::<Vec<_>>().into_iter().for_each(|h|{h.join();});
 }
 
-// #[test]
+#[test]
 fn acell_load_store() {
     // Actual test. Kinda slow (with miri). ~20 000 loads/stores.
     let fancy_cell = Arc::new(AtomicCell::new("Bonjour"));
     //let arcyboi = fancy_cell.clone();
     let mut vector = Vec::new();
 
-    for _ in 0..1000 {
+    for _ in 0..10 {
         //let copy = arcyboi.clone();
         let other_copy = fancy_cell.clone();
 
@@ -141,4 +130,3 @@ fn summing() {
 
     assert_eq!((*fancy_cell.load()), 100)
 }
-*/
