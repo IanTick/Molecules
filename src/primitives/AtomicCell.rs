@@ -1,10 +1,8 @@
-use std::borrow::Borrow;
-use std::cell::UnsafeCell;
 #[deny(clippy::pedantic)]
+use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 use std::sync::atomic::{fence, AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::mem::ManuallyDrop;
 
 
 /* AtomicCell<T> simulates basic atomic operations on any type T. It mimics the behaviour of actual atomics:
@@ -50,10 +48,14 @@ impl<T> AtomicCell<T> {
         As this is the first ACNode created it should be chained.*/
         unsafe {
             // Load is relaxable because no other thread accessed it before
-            (*(cell.ptr.load(Ordering::Acquire)))
+            (*(cell.ptr.load(Ordering::SeqCst)))
+            
+//            (*(cell.ptr.load(Ordering::Acquire)))
                 .chained_flag
                 // Release is necessary, so that all threads read the updated ptr.
-                .store(true, Ordering::Release);
+                .store(true, Ordering::SeqCst);
+
+                //                .store(true, Ordering::Release);
         }
         cell
     }
@@ -64,19 +66,28 @@ impl<T> AtomicCell<T> {
 
         /* The AtomicPtr makes this operation atomic. Any future accesses now follow the new pointer to the new ACNode.
         However some bookkeeping has to be done with the old ACNode. */
-        let old = self.ptr.swap(to_acnode, Ordering::AcqRel);
+        let old = self.ptr.swap(to_acnode, Ordering::SeqCst);
+
+        //        let old = self.ptr.swap(to_acnode, Ordering::AcqRel);
 
         /* This links the ACNode we just made to the old ACNode. Afterwards the new ACNode is considered "chained" because it points to it predecessor. */
         unsafe {
             // This is safeguarded by the chained flag. The write becomes visible to other threads after a sync with the fence.
             *(*to_acnode).next.get() = old;
-            fence(Ordering::AcqRel);
+            fence(Ordering::SeqCst);
+            //            fence(Ordering::AcqRel);
             // Drop the safeguard of .next TODO NO REORDER WITH FENCE required
-            (*to_acnode).chained_flag.store(true, Ordering::Release);
+            (*to_acnode).chained_flag.store(true, Ordering::SeqCst);
+
+            //            (*to_acnode).chained_flag.store(true, Ordering::Release);
         }
 
         /* Lastly it checks if freeing of memory can be done. */
-        // TODO MIRI WHY IS THIS DANGLE
+        if self.load_counter.load(Ordering::SeqCst) == 0 {
+            unsafe {
+                self.free(to_acnode);
+            }
+        }
         //if self.load_counter.load(Ordering::Acquire) == 0 {
         //    unsafe {
         //        self.free(to_acnode);
@@ -88,14 +99,26 @@ impl<T> AtomicCell<T> {
     pub fn load(&self) -> Arc<T> {
         /* Marks that we perform a load operation. Since a thread may be stuck between getting the ptr and derefing it no frees must happen while a load is in progress.
         Otherwise the ACNode may be removed from under our feet. */
-        self.load_counter.fetch_add(1, Ordering::AcqRel);
+        self.load_counter.fetch_add(1, Ordering::SeqCst);
+
+//        self.load_counter.fetch_add(1, Ordering::AcqRel);
         // Load visibly happens after the fetch_add
-        let latest = self.ptr.load(Ordering::Acquire);
+        let latest = self.ptr.load(Ordering::SeqCst);
+
+//        let latest = self.ptr.load(Ordering::Acquire);
         /* .value of the ACNode stores an Arc */
         let ret_val = unsafe { (*(*latest).value.get()).clone() };
 
         /* Again, free memory if possible. And mark the load operation as completed. */
         // fetch_sub happens visibly after the load
+        
+        if self.load_counter.fetch_sub(1, Ordering::SeqCst) == 1 {
+            unsafe {
+                
+                self.free(latest );
+            }
+         }
+        
         // if self.load_counter.fetch_sub(1, Ordering::AcqRel) == 1 {
         //    unsafe {
         //        self.free(latest);
@@ -110,7 +133,9 @@ impl<T> AtomicCell<T> {
         let to_acnode = ACNode::new(value);
 
         // AcqRel makes sure we get the latest, still "in use" ptr and make our ptr the "in use" new one
-        let old = self.ptr.swap(to_acnode, Ordering::AcqRel);
+        let old = self.ptr.swap(to_acnode, Ordering::SeqCst);
+
+//        let old = self.ptr.swap(to_acnode, Ordering::AcqRel);
 
         let ret_val;
         unsafe {
@@ -120,12 +145,16 @@ impl<T> AtomicCell<T> {
 
             // Connect the new ACNode to the older one.
             *(*to_acnode).next.get() = old;
-            fence(Ordering::AcqRel);
+            fence(Ordering::SeqCst);
+//            fence(Ordering::AcqRel);
             // TODO REQUIRE NO REORDER OF FENCES (for other threads too)
-            (*to_acnode).chained_flag.store(true, Ordering::Release);
+            (*to_acnode).chained_flag.store(true, Ordering::SeqCst);
+//            (*to_acnode).chained_flag.store(true, Ordering::Release);
         }
 
-        if self.load_counter.load(Ordering::Acquire) == 0 {
+        if self.load_counter.load(Ordering::SeqCst) == 0 {
+        
+//        if self.load_counter.load(Ordering::Acquire) == 0 {
             unsafe {
                 self.free(to_acnode);
             };
@@ -141,18 +170,15 @@ impl<T> AtomicCell<T> {
     unsafe fn free(&self, latest: *mut ACNode<T>) {
         /* Remember the "chained flag" of ACNode? It signals whether an ACNode is fully initialized. To perform any operation we "unchain" the ACNode
         thereby guranteering that is was chained and that no other thread can operate on it. */
-
-        // @MIRI COMPLAINS STACKED BORROWS:
-        /*
-        (AcqRel, Acquire) => intrinsics::atomic_cxchg_acqrel_acquire(dst, old, new),
-     |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not granting access to tag <96258> because that would remove [Unique for <96163>] which is weakly protected because it is an argument of call 44621
         
-         */
+        // @MIRI: This calls the intrinsic function
         match (*latest).chained_flag.compare_exchange(
             true,
             false,
-            Ordering::AcqRel,
-            Ordering::Acquire
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+//            Ordering::AcqRel,
+//            Ordering::Acquire
         ) {
             /* If the cas on the first ACNode succeeds we can proceed...
             Remember: "latest" is the pointer to the very first ("latest") ACNode. */
@@ -185,8 +211,10 @@ impl<T> AtomicCell<T> {
                         match (*prev_next_ptr).chained_flag.compare_exchange(
                             true,
                             false,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+//                            Ordering::AcqRel,
+//                            Ordering::Acquire,
                         ) {
                             // Read the next ptr of the node
                             // Note: We never deref next_next_ptr! Only as prev_next_ptr in the following iteration!
@@ -195,8 +223,6 @@ impl<T> AtomicCell<T> {
 
                                 if next_next_ptr == prev_next_ptr {
                                     // This node is self-referential. Drop it! As it was the last node, we are done.
-                                    
-                                    // ManuallyDrop::drop(&mut *prev_next_ptr);
                                     let drop_this = Box::from_raw(prev_next_ptr);
                                     drop(drop_this); // gonna be explicit here :)
                                                      // Make the first node self-ref, to mark as end.
@@ -208,13 +234,14 @@ impl<T> AtomicCell<T> {
 
                                     // Acq to revent inner_thread reordering with the following store.
                                     // => write visibly happens before the store
-                                    fence(Ordering::AcqRel);
-                                    // TODO Check Reorder
-                                    (*latest).chained_flag.store(true, Ordering::Release);
+                                    fence(Ordering::SeqCst);
+//                                    fence(Ordering::AcqRel);
+                                    (*latest).chained_flag.store(true, Ordering::SeqCst);
+
+//                                    (*latest).chained_flag.store(true, Ordering::Release);
                                     break;
                                 } else {
                                     // This node has a next. Drop this node and proceed with its next ptr.
-                                    // ManuallyDrop::drop(&mut * prev_next_ptr);  
                                     let drop_this = Box::from_raw(prev_next_ptr);
                                     drop(drop_this); // gonna be explicit here :)
                                     prev_next_ptr = next_next_ptr;
@@ -223,8 +250,12 @@ impl<T> AtomicCell<T> {
                             Err(_) => {
                                 // This node is not chained, we cant drop it and we cant proceed. Therefore we "bridge" to it for future frees. Then we are done.
                                 *(*latest).next.get() = prev_next_ptr;
-                                fence(Ordering::AcqRel);
-                                (*latest).chained_flag.store(true, Ordering::Release);
+                                fence(Ordering::SeqCst);
+
+//                                fence(Ordering::AcqRel);
+                                (*latest).chained_flag.store(true, Ordering::SeqCst);
+
+//                                (*latest).chained_flag.store(true, Ordering::Release);
                                 break;
                             }
                         }
@@ -238,7 +269,8 @@ impl<T> AtomicCell<T> {
                     }
                 } else {
                     // Is self-ref, hit undo.
-                    (*latest).chained_flag.store(true, Ordering::Release);
+                    (*latest).chained_flag.store(true, Ordering::SeqCst);
+//                    (*latest).chained_flag.store(true, Ordering::Release);
                 }
             }
 
@@ -250,13 +282,13 @@ impl<T> AtomicCell<T> {
 
     // TODO Inline this
     pub(crate) unsafe fn phantom_double_load(&self) -> (Arc<T>, *mut ACNode<T>) {
-        let latest = self.ptr.load(Ordering::Acquire);
+        let latest = self.ptr.load(Ordering::SeqCst);
+//        let latest = self.ptr.load(Ordering::Acquire);
         /* .value of the ACNode stores an Arc */
         let ret_val = unsafe { (*(*latest).value.get()).clone() };
         (ret_val, latest)
     }
 
-    /// Tested
     pub(crate) unsafe fn cas(
         &self,
         expected: *mut ACNode<T>,
@@ -265,7 +297,9 @@ impl<T> AtomicCell<T> {
 
         match self
             .ptr
-            .compare_exchange(expected, new, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst)
+
+//            .compare_exchange(expected, new, Ordering::AcqRel, Ordering::Acquire)
         {
             Ok(_) => Ok(()),
             Err(_) => Err(()),
@@ -276,11 +310,12 @@ impl<T> AtomicCell<T> {
     /// O is the (optional) output of the closure.
     pub fn fetch_update<O, F>(&self, mut func: F) -> std::thread::Result<O>
     where
-        // Can be FnMut, but it's probably a logic error for you if it isn't also Fn
+        // Can be FnMut, but it's probably a logic error for you (if it isn't also Fn)
         F: FnMut(Arc<T>) -> (Arc<T>, O),
     {
         loop {
-            self.load_counter.fetch_add(1, Ordering::AcqRel);
+            self.load_counter.fetch_add(1, Ordering::SeqCst);
+//            self.load_counter.fetch_add(1, Ordering::AcqRel);
             let (arg, ptr) = unsafe { self.phantom_double_load() };
 
             let (write, output) =
@@ -289,7 +324,8 @@ impl<T> AtomicCell<T> {
                     Ok(tuple) => tuple,
                     Err(panic_message) => {
                         // Prevents the "block"
-                        self.load_counter.fetch_sub(1, Ordering::AcqRel);
+                        self.load_counter.fetch_sub(1, Ordering::SeqCst);
+//                        self.load_counter.fetch_sub(1, Ordering::AcqRel);
                         return Err(panic_message);
                     }
                 };
@@ -301,14 +337,20 @@ impl<T> AtomicCell<T> {
                 match self.cas(ptr, to_new) {
                     Ok(_) => {
                         *(*to_new).next.get() = ptr;
-                        fence(Ordering::AcqRel);
-                        (*to_new).chained_flag.store(true, Ordering::Release);
-                        self.load_counter.fetch_sub(1, Ordering::AcqRel);
+                        fence(Ordering::SeqCst);
+//                        fence(Ordering::AcqRel);
+                        (*to_new).chained_flag.store(true, Ordering::SeqCst);
+
+//                        (*to_new).chained_flag.store(true, Ordering::Release);
+                        self.load_counter.fetch_sub(1, Ordering::SeqCst);
+//                        self.load_counter.fetch_sub(1, Ordering::AcqRel);
                         return Ok(output);
                     }
                     Err(_) => {
-                        self.load_counter.fetch_sub(1, Ordering::AcqRel);
-                        // ManuallyDrop::drop(&mut *to_new);
+                        self.load_counter.fetch_sub(1, Ordering::SeqCst);
+
+//                        self.load_counter.fetch_sub(1, Ordering::AcqRel);
+
                         drop(Box::from_raw(to_new));
                         continue;
                     }
@@ -318,6 +360,7 @@ impl<T> AtomicCell<T> {
     }
 }
 
+// Deprecate?
 impl<T: Eq> AtomicCell<T> {
     pub fn cas_by_eq(&self, expected: &T, new: T) -> Result<(), ()> {
         let to_new = ACNode::new(new);
@@ -350,15 +393,13 @@ impl<T: Eq> AtomicCell<T> {
 impl<T> Drop for AtomicCell<T> {
     fn drop(&mut self) {
         // No reference to AtomicCell exists, since its dropping.
-        // self.load(); // Drops all but the current ACNode (Load counter = 0) => call to free
-        unsafe {
-            // MIRI FREE LOGIC F'D UP
-            self.free(*(*self.ptr.load(Ordering::Acquire)).next.get());
-        }
-        let latest = self.ptr.load(Ordering::Acquire);
+        self.load(); // Drops all but the current ACNode (Load counter = 0) => call to free, can be optimised
+
+        let latest = self.ptr.load(Ordering::SeqCst);
+
+//        let latest = self.ptr.load(Ordering::Acquire);
         unsafe {
             // Manually drop the latest node.
-            // ManuallyDrop::drop(&mut *latest);
             let boxed_last_node = Box::from_raw(latest);
             drop(boxed_last_node);
         }
@@ -371,8 +412,9 @@ unsafe impl<T: Send> Send for AtomicCell<T> {}
 unsafe impl<T: Send + Sync> Sync for AtomicCell<T> {}
 
 
-pub struct ACNode<T> {
+struct ACNode<T> {
     next: UnsafeCell<*mut Self>,
+    // TODO This unsafe cell is currently redundant
     value: UnsafeCell<Arc<T>>,
     chained_flag: AtomicBool,
 }
@@ -385,22 +427,17 @@ impl<T> ACNode<T> {
             next: UnsafeCell::from(false_ptr),
             value: UnsafeCell::from(Arc::new(value)),
             chained_flag: AtomicBool::new(false),
-        };
-    
-        // MIRI: THIS APPEARS TO "FALSELY" CREATE A NO ALIAS POINTER
+        };    
+        
         // Box::into_raw(Box::new(x))
-        // let manual = ManuallyDrop::new(pre);
-        // let cell = Box::into_raw(Box::new(UnsafeCell::new(manual)));
         let x = Box::into_raw(Box::new(UnsafeCell::new(pre)));
- 
 
-        
-        
         unsafe {
             let correct_ptr = (*x).get();
             * (*correct_ptr).next.get_mut() = correct_ptr; // next is now ptr to self on heap. Self is "leaked".
         
-        
+        fence(Ordering::SeqCst);
+//      fence(Ordering::Release);
         correct_ptr
         }
     } 
@@ -416,7 +453,6 @@ impl<T> ACNode<T> {
 
         
         //let man = ManuallyDrop::new(pre);
-        //let cell = Box::into_raw(Box::new(UnsafeCell::new(man)));
         let x = Box::into_raw(Box::new(UnsafeCell::new(pre)));
         
         
@@ -425,15 +461,9 @@ impl<T> ACNode<T> {
 
            * (*correct_ptr).next.get_mut() = correct_ptr; // next is now ptr to self on heap. Self is "leaked".
         
+        fence(Ordering::SeqCst);
+//      fence(Ordering::Release);
         correct_ptr
-        }
-    }
-
-    fn into_inner(ptr: *mut ManuallyDrop<Self>) -> Result<T, Arc<T>> {
-        unsafe {
-            let extracted = (*(*ptr).value.get()).clone();
-            ManuallyDrop::drop(&mut *ptr);
-            return Arc::try_unwrap(extracted);
         }
     }
 }
