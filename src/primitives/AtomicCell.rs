@@ -83,16 +83,13 @@ impl<T> AtomicCell<T> {
         }
 
         /* Lastly it checks if freeing of memory can be done. */
-        if self.load_counter.load(Ordering::SeqCst) == 0 {
+        // Communicate attempt at entering critical section
+        if self.load_counter.fetch_add(1, Ordering::SeqCst) == 0 {
             unsafe {
                 self.free(to_acnode);
             }
         }
-        //if self.load_counter.load(Ordering::Acquire) == 0 {
-        //    unsafe {
-        //        self.free(to_acnode);
-        //    }
-        //}
+        self.load_counter.fetch_sub(1, Ordering::SeqCst);
     }
 
     /* Loading is a very simple task. It simply follows the 'AtomicPtr' and reads the value stored in the current ACNode. Loads will always only get the latest value. */
@@ -112,23 +109,17 @@ impl<T> AtomicCell<T> {
         /* Again, free memory if possible. And mark the load operation as completed. */
         // fetch_sub happens visibly after the load
         
-        if self.load_counter.fetch_sub(1, Ordering::SeqCst) == 1 {
-            unsafe {
-                
-                self.free(latest );
-            }
-         }
+        // Only access is us:
+        if self.load_counter.load(Ordering::SeqCst) == 1 {
+            unsafe{ self.free(latest )}
+        }
+        self.load_counter.fetch_sub(1, Ordering::SeqCst);
         
-        // if self.load_counter.fetch_sub(1, Ordering::AcqRel) == 1 {
-        //    unsafe {
-        //        self.free(latest);
-        //    }
-        // }
         ret_val
     }
 
     /* Swap resembles a store operation. In addition if also follows the "old-pointer" to its predecessor to get its value.
-    Swaps always return the value they replaced. Swaps do not load.*/
+    Swaps always return the value they replaced. */
     pub fn swap(&self, value: T) -> Arc<T> {
         let to_acnode = ACNode::new(value);
 
@@ -152,13 +143,15 @@ impl<T> AtomicCell<T> {
 //            (*to_acnode).chained_flag.store(true, Ordering::Release);
         }
 
-        if self.load_counter.load(Ordering::SeqCst) == 0 {
         
-//        if self.load_counter.load(Ordering::Acquire) == 0 {
+        /* Lastly it checks if freeing of memory can be done. */
+        // Communicate attempt at entering critical section
+        if self.load_counter.fetch_add(1, Ordering::SeqCst) == 0 {
             unsafe {
                 self.free(to_acnode);
-            };
+            }
         }
+        self.load_counter.fetch_sub(1, Ordering::SeqCst);
 
         ret_val
     }
@@ -171,7 +164,9 @@ impl<T> AtomicCell<T> {
         /* Remember the "chained flag" of ACNode? It signals whether an ACNode is fully initialized. To perform any operation we "unchain" the ACNode
         thereby guranteering that is was chained and that no other thread can operate on it. */
         
-        // @MIRI: This calls the intrinsic function
+        // @MIRI: SEEMS LIKE MULTIPLE THREADS CAN ARRIVE HERE, CAUSING A DATA RACE
+        // FOUND ERROR: CHECKING FOR LOAD COUNTER == 0, then stall: => THREAD 1 has a pointer to a node (ptr1) with a free(ptr1) pending;
+        // THREAD 2 COMES IN AND READS THE LOAD COUNTER == 0, wanting to dealloc too => during dealloc it removes *ptr1 => race
         match (*latest).chained_flag.compare_exchange(
             true,
             false,
@@ -308,6 +303,7 @@ impl<T> AtomicCell<T> {
 
     /// Reads an Arc<T> and stores an Arc<T>. No other thread is guarenteed to have made a store in between the read and store.
     /// O is the (optional) output of the closure.
+    // TODO: ATTEMPT FREE
     pub fn fetch_update<O, F>(&self, mut func: F) -> std::thread::Result<O>
     where
         // Can be FnMut, but it's probably a logic error for you (if it isn't also Fn)
@@ -360,7 +356,7 @@ impl<T> AtomicCell<T> {
     }
 }
 
-// Deprecate?
+// Deprecate? TODO: ATTEMPT FREE
 impl<T: Eq> AtomicCell<T> {
     pub fn cas_by_eq(&self, expected: &T, new: T) -> Result<(), ()> {
         let to_new = ACNode::new(new);

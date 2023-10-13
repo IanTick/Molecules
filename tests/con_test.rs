@@ -37,7 +37,7 @@ fn first(){
         x.store("Bonjour");
     }
 
-// #[test]
+#[test]
 fn acell_store() {
     let fancy_cell = Arc::new(AtomicCell::new("Bonjour"));
 
@@ -45,12 +45,12 @@ fn acell_store() {
 }
 
 
-// #[test]
+ #[test]
 fn summing() {
-    let bar = Arc::new(std::sync::Barrier::new(1000));
+    let bar = Arc::new(std::sync::Barrier::new(100));
     let fancy_cell = Arc::new(AtomicCell::new(0u64));
 
-    let vector = (1..=1000u64)
+    let vector = (1..=100u64)
         .map(|_num| {
             let x = fancy_cell.clone();
             let xbar = bar.clone();
@@ -61,5 +61,5 @@ fn summing() {
         _=x.join();
     }
 
-    assert_eq!((*fancy_cell.load()), 1000)
+    assert_eq!((*fancy_cell.load()), 100)
 }
